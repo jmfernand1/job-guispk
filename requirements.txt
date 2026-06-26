@@ -1,0 +1,6 @@
+# Dependencias de la app de enmascaramiento.
+# Sparky es una libreria INTERNA ya instalada en el entorno del usuario; no va aqui.
+PyQt6>=6.5
+pandas>=1.5
+# Para correr los tests:
+pytest>=7.0
