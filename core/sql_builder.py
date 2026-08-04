@@ -3,7 +3,7 @@
 Sin dependencias de UI ni de red: testeable de forma aislada.
 """
 
-from app import masking
+from core import masking
 
 
 def _validate(fields, src_table, dest_table):
@@ -29,23 +29,27 @@ def build_create(fields, dest_table) -> str:
     )
 
 
-def build_insert(fields, src_table, dest_table, text_salt, int_salt, filters) -> str:
-    """Genera el INSERT INTO ... SELECT ... FROM <origen> con los alias."""
+def build_insert(fields, src_table, dest_table, text_salt, int_salt, filters=None) -> str:
+    """Genera el INSERT INTO ... SELECT ... FROM <origen> con los alias.
+
+    `filters` es la clausula WHERE (sin la palabra WHERE); si viene vacia o None
+    la tabla se trata como no particionada y se inserta completa.
+    """
     lines = []
     for f in fields:
         expr = masking.select_expr(f["col"], f["masking"], text_salt, int_salt)
         lines.append(f"  {expr} AS {f['col']}")
     select = ",\n".join(lines)
+    where = f"\nWHERE {filters.strip()}" if filters and filters.strip() else ""
     return (
         f"INSERT INTO {dest_table}\n"
         f"SELECT\n"
         f"{select}\n"
-        f"FROM {src_table}\n"
-        f"WHERE {filters};"
+        f"FROM {src_table}{where};"
     )
 
 
-def build_script(fields, src_table, dest_table, text_salt, int_salt, filters):
+def build_script(fields, src_table, dest_table, text_salt, int_salt, filters=None):
     """Devuelve (create, insert, script_completo).
 
     El script completo concatena ambos con un comentario de cabecera.
@@ -70,3 +74,19 @@ def build_script(fields, src_table, dest_table, text_salt, int_salt, filters):
         f"{insert}\n"
     )
     return create, insert, script
+
+
+def build_request_script(fields, src_table, dest_table, filters=None):
+    """Script con salts placeholder: es el que genera el aliado en su solicitud.
+
+    El interno regenera este mismo script desde fields_json y lo compara contra
+    el sql_preview guardado para detectar cualquier alteracion antes de ejecutar.
+    """
+    return build_script(
+        fields,
+        src_table,
+        dest_table,
+        masking.TEXT_SALT_PLACEHOLDER,
+        masking.INT_SALT_PLACEHOLDER,
+        filters,
+    )

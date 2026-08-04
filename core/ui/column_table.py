@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app import masking
+from core import masking
 
 COL_USE = 0
 COL_NAME = 1
@@ -98,6 +98,10 @@ class ColumnTable(QTableWidget):
         self._int_salt = int_salt if int_salt not in (None, "") else "12345"
         for row in range(self.rowCount()):
             self._refresh_row(row)
+
+    def use_placeholder_salts(self):
+        """Modo aliado: la vista previa muestra los placeholders, no salts reales."""
+        self.update_salts(masking.TEXT_SALT_PLACEHOLDER, masking.INT_SALT_PLACEHOLDER)
 
     # -- seleccion ----------------------------------------------------------
     def set_all_checked(self, checked: bool):

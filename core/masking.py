@@ -21,6 +21,12 @@ LABELS = {
     NONE: "Sin enmascarar",
 }
 
+# Placeholders de salts: el aliado genera SQL con estos tokens y el equipo
+# interno los sustituye por los salts reales justo antes de ejecutar.
+# Los salts reales NUNCA se guardan en la BD compartida.
+TEXT_SALT_PLACEHOLDER = "{{TEXT_SALT}}"
+INT_SALT_PLACEHOLDER = "{{INT_SALT}}"
+
 
 def base_type(impala_type: str) -> str:
     """Normaliza un tipo Impala a su forma base.
@@ -58,3 +64,10 @@ def dest_type(orig_type: str, masking: str) -> str:
     if masking == MASK_INT:
         return "BIGINT"
     return orig_type
+
+
+def apply_salts(sql: str, text_salt: str, int_salt) -> str:
+    """Sustituye los placeholders de salt por los valores reales (lado interno)."""
+    return sql.replace(TEXT_SALT_PLACEHOLDER, str(text_salt)).replace(
+        INT_SALT_PLACEHOLDER, str(int_salt)
+    )

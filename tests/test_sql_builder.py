@@ -1,13 +1,8 @@
 """Tests de generacion de DDL/DML (sin red)."""
 
-import os
-import sys
-
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from app import masking, sql_builder
+from core import masking, sql_builder
 
 FIELDS = [
     {"col": "nombre", "type": "string", "masking": masking.MASK_TEXT},

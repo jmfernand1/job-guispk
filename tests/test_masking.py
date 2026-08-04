@@ -1,11 +1,6 @@
 """Tests del mapeo de tipos y constructores de expresiones (sin red)."""
 
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from app import masking
+from core import masking
 
 
 def test_base_type_strips_params():

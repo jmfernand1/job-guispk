@@ -1,6 +1,7 @@
 """Stub de Sparky para correr la app y los tests sin cluster.
 
-Imita la interfaz interna: obtener_df / ejecutar_query / ejecutar_archivo.
+Imita la interfaz real que usa SparkyClient: un atributo `.helper` con
+obtener_dataframe / ejecutar_consulta / ejecutar_archivo / obtener_ultima_ingestion.
 """
 
 import pandas as pd
@@ -12,9 +13,17 @@ class FakeSparky:
         self.password = password
         self.dsn = dsn
         self.executed = []  # historial de queries ejecutadas
+        self.helper = self  # SparkyClient usa spk.helper.<metodo>
 
-    def obtener_df(self, query):
-        """Devuelve un DESCRIBE de ejemplo para cualquier tabla."""
+    def obtener_dataframe(self, query):
+        """DESCRIBE y SHOW PARTITIONS de ejemplo para cualquier tabla."""
+        if query.strip().upper().startswith("SHOW PARTITIONS"):
+            data = [
+                ("2026-07-01", 100, 1),
+                ("2026-08-01", 200, 1),
+                ("Total", 300, 2),
+            ]
+            return pd.DataFrame(data, columns=["ingestion_day", "#Rows", "#Files"])
         data = [
             ("id_cliente", "bigint", ""),
             ("nombre", "string", ""),
@@ -26,10 +35,13 @@ class FakeSparky:
         ]
         return pd.DataFrame(data, columns=["name", "type", "comment"])
 
-    def ejecutar_query(self, query):
+    def ejecutar_consulta(self, query):
         self.executed.append(query)
         return f"OK: {query[:40]}..."
 
     def ejecutar_archivo(self, path):
         self.executed.append(f"FILE:{path}")
         return f"OK archivo: {path}"
+
+    def obtener_ultima_ingestion(self, tabla):
+        return "2026-08-01"

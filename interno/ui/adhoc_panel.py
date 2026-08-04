@@ -1,8 +1,9 @@
-"""Ventana principal de la app de enmascaramiento (PyQt6)."""
+"""Flujo ad-hoc original: DESCRIBE -> seleccionar -> generar -> ejecutar.
 
-import os
+Usa el SparkyClient compartido de la ventana principal (tab Conexion).
+"""
+
 import random
-import tempfile
 
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -10,7 +11,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -18,67 +18,32 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app import sql_builder
-from app.sparky_client import SparkyClient, credentials_from_env
-from app.ui.column_table import ColumnTable
-from app.workers import ConnectWorker, DescribeWorker, ExecuteWorker
+from core import sql_builder
+from core.ui.column_table import ColumnTable
+from interno.sparky_client import extract_columns
+from interno.workers import DescribeWorker, ExecuteWorker
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, sparky_factory=None):
-        super().__init__()
-        self.setWindowTitle("Enmascarador de datos - proceso_enmascarado")
-        self.resize(980, 800)
-
-        self.client = SparkyClient(sparky_factory=sparky_factory)
+class AdHocPanel(QWidget):
+    def __init__(self, client, status_cb, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self._set_status = status_cb
         self._create_sql = None
         self._insert_sql = None
         self._full_script = None
         self._worker = None  # referencia viva al worker en curso
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-
-        root.addWidget(self._build_connection_group())
+        root = QVBoxLayout(self)
         root.addWidget(self._build_source_group())
         root.addWidget(self._build_columns_group())
         root.addWidget(self._build_salts_group())
         root.addWidget(self._build_dest_group())
         root.addWidget(self._build_actions_group())
 
-        self.status_label = QLabel("Listo.")
-        self.statusBar().addWidget(self.status_label)
-
-    # -- 1. Conexion --------------------------------------------------------
-    def _build_connection_group(self):
-        box = QGroupBox("1. Conexion (Sparky / Impala)")
-        lay = QHBoxLayout(box)
-        creds = credentials_from_env()
-
-        self.user_edit = QLineEdit(creds["username"])
-        self.dsn_edit = QLineEdit(creds["dsn"])
-        self.pwd_edit = QLineEdit(creds["password"])
-        self.pwd_edit.setEchoMode(QLineEdit.EchoMode.Password)
-
-        lay.addWidget(QLabel("Usuario:"))
-        lay.addWidget(self.user_edit)
-        lay.addWidget(QLabel("DSN:"))
-        lay.addWidget(self.dsn_edit)
-        lay.addWidget(QLabel("Contrasena:"))
-        lay.addWidget(self.pwd_edit)
-
-        self.connect_btn = QPushButton("Conectar")
-        self.connect_btn.clicked.connect(self.on_connect)
-        lay.addWidget(self.connect_btn)
-
-        self.conn_status = QLabel("Sin conectar")
-        lay.addWidget(self.conn_status)
-        return box
-
-    # -- 2. Tabla origen ----------------------------------------------------
+    # -- 1. Tabla origen ----------------------------------------------------
     def _build_source_group(self):
-        box = QGroupBox("2. Tabla origen")
+        box = QGroupBox("1. Tabla origen")
         lay = QHBoxLayout(box)
         self.src_edit = QLineEdit()
         self.src_edit.setPlaceholderText("esquema.tabla")
@@ -89,9 +54,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.describe_btn)
         return box
 
-    # -- 3. Campos ----------------------------------------------------------
+    # -- 2. Campos ----------------------------------------------------------
     def _build_columns_group(self):
-        box = QGroupBox("3. Campos")
+        box = QGroupBox("2. Campos")
         lay = QVBoxLayout(box)
         btn_row = QHBoxLayout()
         all_btn = QPushButton("Seleccionar todo")
@@ -106,9 +71,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.table)
         return box
 
-    # -- 4. Salts -----------------------------------------------------------
+    # -- 3. Salts -----------------------------------------------------------
     def _build_salts_group(self):
-        box = QGroupBox("4. Salts (privados - mismo salt por tipo = integridad referencial)")
+        box = QGroupBox("3. Salts (privados - mismo salt por tipo = integridad referencial)")
         lay = QHBoxLayout(box)
         self.text_salt_edit = QLineEdit("saltTexto")
         self.int_salt_edit = QLineEdit("12345")
@@ -138,9 +103,9 @@ class MainWindow(QMainWindow):
     def _gen_int_salt(self):
         self.int_salt_edit.setText(str(random.randint(10000, 999999999)))
 
-    # -- 5. Destino ---------------------------------------------------------
+    # -- 4. Destino ---------------------------------------------------------
     def _build_dest_group(self):
-        box = QGroupBox("5. Tabla destino")
+        box = QGroupBox("4. Tabla destino")
         lay = QHBoxLayout(box)
         self.dest_edit = QLineEdit()
         self.dest_edit.setPlaceholderText("proceso_enmascarado.<tabla>_enm")
@@ -148,9 +113,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.dest_edit)
         return box
 
-    # -- 6. Acciones --------------------------------------------------------
+    # -- 5. Acciones --------------------------------------------------------
     def _build_actions_group(self):
-        box = QGroupBox("6. Acciones")
+        box = QGroupBox("5. Acciones")
         lay = QVBoxLayout(box)
         btn_row = QHBoxLayout()
         self.gen_btn = QPushButton("Generar SQL")
@@ -175,33 +140,6 @@ class MainWindow(QMainWindow):
     # ======================================================================
     # Handlers
     # ======================================================================
-    def _set_status(self, msg):
-        self.status_label.setText(msg)
-
-    def on_connect(self):
-        self.connect_btn.setEnabled(False)
-        self.conn_status.setText("Conectando...")
-        self._worker = ConnectWorker(
-            self.client,
-            self.user_edit.text(),
-            self.pwd_edit.text(),
-            self.dsn_edit.text(),
-        )
-        self._worker.finished.connect(self._on_connected)
-        self._worker.error.connect(self._on_connect_error)
-        self._worker.start()
-
-    def _on_connected(self, msg):
-        self.connect_btn.setEnabled(True)
-        self.conn_status.setText("Conectado")
-        self._set_status(msg)
-
-    def _on_connect_error(self, msg):
-        self.connect_btn.setEnabled(True)
-        self.conn_status.setText("Error")
-        self._set_status(f"Error de conexion: {msg}")
-        QMessageBox.critical(self, "Error de conexion", msg)
-
     def on_describe(self):
         tabla = self.src_edit.text().strip()
         if not tabla:
@@ -219,7 +157,7 @@ class MainWindow(QMainWindow):
 
     def _on_described(self, df):
         self.describe_btn.setEnabled(True)
-        columns = self._extract_columns(df)
+        columns = extract_columns(df)
         if not columns:
             self._set_status("DESCRIBE no devolvio columnas.")
             return
@@ -233,22 +171,6 @@ class MainWindow(QMainWindow):
         self._set_status(f"Error en DESCRIBE: {msg}")
         QMessageBox.critical(self, "Error en DESCRIBE", msg)
 
-    @staticmethod
-    def _extract_columns(df):
-        """De un DataFrame DESCRIBE saca [(name, type)] hasta fila en blanco."""
-        cols = []
-        # Impala DESCRIBE: columnas name | type | comment
-        name_key = "name" if "name" in df.columns else df.columns[0]
-        type_key = "type" if "type" in df.columns else df.columns[1]
-        for _, row in df.iterrows():
-            name = str(row[name_key]).strip()
-            ctype = str(row[type_key]).strip()
-            if not name or name.startswith("#"):
-                # cabeceras de particiones u otras secciones -> fin de columnas
-                break
-            cols.append((name, ctype))
-        return cols
-
     def _prefill_dest(self):
         src = self.src_edit.text().strip()
         if not src:
@@ -259,14 +181,17 @@ class MainWindow(QMainWindow):
     def on_generate(self):
         try:
             fields = self.table.selected_fields()
-            where_clause = self.client.get_partition(self.src_edit.text().strip())
+            try:
+                where_clause = self.client.get_partition(self.src_edit.text().strip())
+            except Exception:  # noqa: BLE001 - tabla sin particiones
+                where_clause = None
             create, insert, script = sql_builder.build_script(
                 fields,
                 self.src_edit.text().strip(),
                 self.dest_edit.text().strip(),
                 self.text_salt_edit.text(),
                 self.int_salt_edit.text(),
-                where_clause.strip(),
+                where_clause,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))

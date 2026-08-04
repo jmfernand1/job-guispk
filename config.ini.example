@@ -1,0 +1,5 @@
+# Copiar como config.ini junto al ejecutable (o al directorio de trabajo).
+# Tambien puede usarse la variable de entorno GUISPK_DB (tiene prioridad).
+[guispk]
+# Ruta al archivo SQLite en la carpeta compartida (OneDrive / unidad de red).
+db_path = ~/OneDrive - Empresa/enmascarado/guispk.db

@@ -1,0 +1,34 @@
+"""Serializacion de campos y helpers comunes a los repos."""
+
+import json
+from datetime import datetime, timezone
+
+
+def utcnow_iso() -> str:
+    """Timestamp ISO-8601 en UTC, segundos enteros (auditable y ordenable)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fields_to_json(fields) -> str:
+    """[{col, type, masking}] -> JSON canonico (claves ordenadas, estable)."""
+    return json.dumps(fields, ensure_ascii=False, sort_keys=True)
+
+
+def fields_from_json(raw: str):
+    return json.loads(raw)
+
+
+def columns_to_json(columns) -> str:
+    """[(name, type)] o [{name, type}] -> JSON de [{name, type}]."""
+    norm = []
+    for c in columns:
+        if isinstance(c, dict):
+            norm.append({"name": c["name"], "type": c["type"]})
+        else:
+            norm.append({"name": c[0], "type": c[1]})
+    return json.dumps(norm, ensure_ascii=False)
+
+
+def columns_from_json(raw: str):
+    """JSON -> [(name, type)] listo para ColumnTable.load_columns."""
+    return [(c["name"], c["type"]) for c in json.loads(raw)]

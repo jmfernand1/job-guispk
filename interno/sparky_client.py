@@ -2,6 +2,7 @@
 
 Aisla la dependencia interna para que la UI y los tests no dependan de ella
 directamente. En tests se inyecta un stub (fake_sparky) via `sparky_factory`.
+Solo la app interna importa este modulo; la app aliada nunca lo toca.
 """
 
 import os
@@ -38,8 +39,8 @@ class SparkyClient:
             raise RuntimeError("No conectado a Sparky. Conecta primero.")
 
     # -- operaciones --------------------------------------------------------
-    def get_partition(self, tabla):
-        """Obtiene los campos de particion de una tabla"""
+    def get_partition_info(self, tabla):
+        """(columnas_de_particion, where_clause) de la ultima particion."""
         self._ensure()
         df = self._lz.obtener_dataframe(f"SHOW PARTITIONS {tabla}")
         cols_antes = df.columns[:df.columns.get_loc('#Rows')].tolist()
@@ -49,14 +50,17 @@ class SparkyClient:
         where_clause = ' and '.join(
             f"{k} = {v}" for k, v in filt[0].items()
             )
-        return where_clause
+        return cols_antes, where_clause
 
-    
+    def get_partition(self, tabla):
+        """Obtiene el WHERE de la ultima particion de una tabla."""
+        return self.get_partition_info(tabla)[1]
+
     def last_ingest(self, tabla):
         """Obtiene la ultima ingestion de la tabla consultada"""
         self._ensure()
         return self._lz.obtener_ultima_ingestion(f"{tabla}")
-    
+
     def describe(self, tabla):
         """DESCRIBE <tabla> -> pandas.DataFrame con columnas name|type|comment."""
         self._ensure()
@@ -71,6 +75,22 @@ class SparkyClient:
         """Ejecuta un archivo .sql con varias sentencias."""
         self._ensure()
         return self._lz.ejecutar_archivo(path)
+
+
+def extract_columns(df):
+    """De un DataFrame DESCRIBE saca [(name, type)] hasta fila en blanco."""
+    cols = []
+    # Impala DESCRIBE: columnas name | type | comment
+    name_key = "name" if "name" in df.columns else df.columns[0]
+    type_key = "type" if "type" in df.columns else df.columns[1]
+    for _, row in df.iterrows():
+        name = str(row[name_key]).strip()
+        ctype = str(row[type_key]).strip()
+        if not name or name.startswith("#"):
+            # cabeceras de particiones u otras secciones -> fin de columnas
+            break
+        cols.append((name, ctype))
+    return cols
 
 
 def credentials_from_env():
