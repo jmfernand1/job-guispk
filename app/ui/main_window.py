@@ -259,12 +259,14 @@ class MainWindow(QMainWindow):
     def on_generate(self):
         try:
             fields = self.table.selected_fields()
+            where_clause = self.client.get_partition(self.src_edit.text().strip())
             create, insert, script = sql_builder.build_script(
                 fields,
                 self.src_edit.text().strip(),
                 self.dest_edit.text().strip(),
                 self.text_salt_edit.text(),
                 self.int_salt_edit.text(),
+                where_clause.strip(),
             )
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))

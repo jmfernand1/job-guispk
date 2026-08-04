@@ -29,7 +29,7 @@ def build_create(fields, dest_table) -> str:
     )
 
 
-def build_insert(fields, src_table, dest_table, text_salt, int_salt) -> str:
+def build_insert(fields, src_table, dest_table, text_salt, int_salt, filters) -> str:
     """Genera el INSERT INTO ... SELECT ... FROM <origen> con los alias."""
     lines = []
     for f in fields:
@@ -40,11 +40,12 @@ def build_insert(fields, src_table, dest_table, text_salt, int_salt) -> str:
         f"INSERT INTO {dest_table}\n"
         f"SELECT\n"
         f"{select}\n"
-        f"FROM {src_table};"
+        f"FROM {src_table}\n"
+        f"WHERE {filters};"
     )
 
 
-def build_script(fields, src_table, dest_table, text_salt, int_salt):
+def build_script(fields, src_table, dest_table, text_salt, int_salt, filters):
     """Devuelve (create, insert, script_completo).
 
     El script completo concatena ambos con un comentario de cabecera.
@@ -58,7 +59,7 @@ def build_script(fields, src_table, dest_table, text_salt, int_salt):
         raise ValueError("Falta el salt entero (hay columnas mask_int).")
 
     create = build_create(fields, dest_table)
-    insert = build_insert(fields, src_table, dest_table, text_salt, int_salt)
+    insert = build_insert(fields, src_table, dest_table, text_salt, int_salt, filters)
     script = (
         f"-- Script de enmascaramiento generado automaticamente\n"
         f"-- Origen : {src_table}\n"
