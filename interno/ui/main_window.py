@@ -335,8 +335,8 @@ class MainWindow(QMainWindow):
     def _update_request_buttons(self):
         req = self._current_request
         state = req["state"] if req else None
-        self.execute_btn.setEnabled(state in states.EJECUTABLES)
-        self.reject_btn.setEnabled(state in states.EJECUTABLES)
+        self.execute_btn.setEnabled(state == states.ENVIADA)
+        self.reject_btn.setEnabled(state == states.ENVIADA)
 
     def _do_transition(self, to_state, comment=None):
         try:
@@ -366,7 +366,7 @@ class MainWindow(QMainWindow):
 
     def on_execute_request(self):
         req = self._current_request
-        if not req or req["state"] not in states.EJECUTABLES:
+        if not req or req["state"] != states.ENVIADA:
             return
         if not self.client.connected:
             QMessageBox.warning(self, "Sin conexion", "Conecta a Sparky primero.")
@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
             f"Solicitud {req['code']} ({len(req['items'])} tabla(s)):\n{tables}\n\n"
             f"Salt: {salts['label']}\n"
             "La particion se re-resolvera contra Impala antes de insertar.\n"
-            "Al ejecutar, la solicitud queda aprobada y ejecutada.\n\n"
+            "Al ejecutar, la solicitud queda ejecutada a tu nombre.\n\n"
             "Continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )

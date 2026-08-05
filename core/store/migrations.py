@@ -30,7 +30,7 @@ CREATE TABLE requests (
   id INTEGER PRIMARY KEY,
   code TEXT NOT NULL UNIQUE,
   state TEXT NOT NULL DEFAULT 'borrador'
-    CHECK (state IN ('borrador','enviada','aprobada','rechazada','ejecutada')),
+    CHECK (state IN ('borrador','enviada','rechazada','ejecutada')),
   requester TEXT NOT NULL,
   created_at TEXT NOT NULL,
   sent_at TEXT,

@@ -13,12 +13,6 @@ def test_valid_transitions_by_role():
     states.validate_transition(states.ENVIADA, states.RECHAZADA, states.ROLE_INTERNO)
 
 
-def test_legacy_aprobada_still_resolvable():
-    # solicitudes viejas atrapadas en 'aprobada' siguen siendo ejecutables
-    states.validate_transition(states.APROBADA, states.EJECUTADA, states.ROLE_INTERNO)
-    states.validate_transition(states.APROBADA, states.RECHAZADA, states.ROLE_INTERNO)
-
-
 def test_unknown_transition_raises():
     with pytest.raises(states.TransitionError):
         states.validate_transition(states.BORRADOR, states.EJECUTADA, states.ROLE_INTERNO)
@@ -26,7 +20,7 @@ def test_unknown_transition_raises():
         states.validate_transition(states.EJECUTADA, states.BORRADOR, states.ROLE_ALIADO)
     # ya no existe el paso de aprobacion
     with pytest.raises(states.TransitionError):
-        states.validate_transition(states.ENVIADA, states.APROBADA, states.ROLE_INTERNO)
+        states.validate_transition(states.ENVIADA, "aprobada", states.ROLE_INTERNO)
 
 
 def test_wrong_role_raises():
