@@ -1,4 +1,10 @@
-"""Construccion de CREATE TABLE + INSERT a partir de la seleccion de campos.
+"""Construccion del SQL a partir de la seleccion de campos.
+
+`build_script` devuelve (drop, create, insert, script_completo): cada corrida
+arranca con DROP ... PURGE, asi que recrear el destino no falla si ya existe.
+`build_request_preview` genera el texto de la solicitud del aliado (columnas
+pedidas, sin enmascaramiento) y `split_statements` parte un script guardado
+para re-ejecutarlo desde el historico.
 
 Sin dependencias de UI ni de red: testeable de forma aislada.
 """

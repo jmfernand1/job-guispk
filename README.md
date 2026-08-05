@@ -43,6 +43,47 @@ Funciones de enmascaramiento (UDFs en la Landing Zone):
 - `default.mask_text(campo, 'salt_texto')` → `STRING`
 - `default.mask_int(cast(campo as bigint), salt_entero)` → `BIGINT`
 
+## Una sesion tipica
+
+1. **Interno — Catalogo.** Da de alta la tabla en *Inventario* y corre *Actualizar
+   catalogo*: DESCRIBE + SHOW PARTITIONS + ultima ingestion quedan publicados para
+   los aliados.
+2. **Aliado — Nueva solicitud.** Elige la tabla del catalogo, marca las columnas que
+   necesita (no ve enmascaramiento), revisa la vista previa y *Enviar*.
+3. **Interno — Solicitudes.** Con el filtro en `enviada` abre la solicitud: arriba el
+   detalle, abajo una tabla con las columnas pedidas. Elige la mascara de cada una,
+   desmarca lo que no deba salir y *Ejecutar solicitud*. El dialogo resume las mascaras,
+   cuantas columnas se excluyen y avisa que el destino se elimina y se recrea.
+4. **Aliado — Mis solicitudes.** Ve la solicitud ejecutada con el enmascaramiento que
+   aplico el interno y las columnas excluidas; puede exportar el detalle en `.txt`.
+5. **Interno — Historico.** El script quedo registrado. Si hay que repetir la corrida
+   (se recargo la fuente, fallo a medias), *Re-ejecutar script* lo corre tal cual con
+   los salts locales.
+
+## Modelo de datos
+
+Todo vive en el SQLite compartido (`core/store/migrations.py`, versionado por
+`PRAGMA user_version`):
+
+| Tabla | Guarda |
+|-------|--------|
+| `inventory` | tablas autorizadas para los aliados (alta/baja del interno) |
+| `table_schemas` | cada captura de esquema: columnas, particiones, ultima ingestion |
+| `requests` | la solicitud: estado, solicitante, revision, ejecucion y su log |
+| `request_items` | una fila por tabla pedida dentro de la solicitud |
+| `script_history` | todo script ejecutado, re-ejecutable |
+| `audit_log` | quien hizo que y cuando: `crear`, `transicion`, `decision_enmascaramiento` |
+
+Dos campos de `request_items` concentran el reparto de responsabilidades:
+
+| Campo | Quien lo escribe | Contenido |
+|-------|------------------|-----------|
+| `fields_json` | aliado | `[{col, type}]` — las columnas que pidio |
+| `fields_final_json` | interno | `[{col, type, masking}]` — la mascara que decidio, ya sin las columnas excluidas |
+| `sql_preview` | aliado | el texto de la solicitud que confirmo; se regenera y compara antes de ejecutar |
+
+`script_history.script` guarda el SQL **con placeholders** de salt, nunca sustituido.
+
 ## Seguridad
 
 - **La BD compartida no contiene secretos**: los aliados pueden leer el archivo.
@@ -116,8 +157,8 @@ python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
 4. **Solicitudes** — revisar el detalle, **elegir la mascara de cada columna**
    (y desmarcar las que no deban salir) y decidir en un solo paso:
    *Ejecutar solicitud* (guarda la decision auditada, verifica, re-resuelve
-   particion, aplica salts, corre CREATE + INSERT y marca ejecutada con log) o
-   *Rechazar* (con motivo).
+   particion, aplica salts, corre DROP + CREATE + INSERT y marca ejecutada con
+   log) o *Rechazar* (con motivo).
 5. **Historico** — todos los scripts ejecutados (solicitudes, ad-hoc y
    re-ejecuciones), con buscador por tabla/solicitud/usuario. Permite ver el
    script, guardarlo como `.sql` y **re-ejecutarlo** tal cual (avisa si el salt
@@ -147,9 +188,17 @@ Distribuir cada exe con su `config.ini` apuntando a la BD compartida.
 python -m pytest tests/ -v
 ```
 
-Sin red ni cluster: mapeo de tipos, generacion de SQL, migraciones, repos,
-maquina de estados (incluye conflictos de concurrencia) y la verificacion
-anti-alteracion (regeneracion vs vista previa).
+Sin red ni cluster (53 tests):
+
+| Archivo | Cubre |
+|---------|-------|
+| `test_masking.py` | mapeo tipo → funcion de enmascaramiento |
+| `test_sql_builder.py` | DROP/CREATE/INSERT, vista previa, `split_statements` |
+| `test_regeneration.py` | verificacion anti-alteracion y que el SQL final lleve la decision del interno |
+| `test_review.py` | el interno solo puede restringir: nada de columnas no pedidas |
+| `test_store.py` | migraciones, repos, ciclo de vida y concurrencia |
+| `test_history.py` | historico y que el script guardado nunca lleve salts reales |
+| `test_states.py` | maquina de estados y roles |
 
 ## Estructura
 
@@ -168,4 +217,12 @@ aliado/                  app aliado: ui/ (nunca importa interno/)
 main_interno.py          entrada app interna (--fake para smoke)
 main_aliado.py           entrada app aliado
 tests/                   pytest + fake_sparky (stub con .helper)
+docs/decisiones/         una decision de diseno por archivo (ver CHANGELOG.md)
 ```
+
+## Por que el sistema es asi
+
+Este README describe **como funciona hoy**. El *por que* de cada decision — por que no hay
+paso de aprobacion, por que el aliado no elige mascaras, por que cada corrida reemplaza el
+destino — esta en [CHANGELOG.md](CHANGELOG.md): un indice con resumen y tags que apunta al
+detalle de cada decision en `docs/decisiones/`.

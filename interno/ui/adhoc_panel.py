@@ -1,6 +1,8 @@
 """Flujo ad-hoc original: DESCRIBE -> seleccionar -> generar -> ejecutar.
 
-Usa el SparkyClient compartido de la ventana principal (tab Conexion).
+Usa el SparkyClient compartido de la ventana principal (tab Conexion). Aqui el
+interno escribe los salts a mano, asi que al historico va la version del script
+con placeholders, no la que se ejecuta.
 """
 
 import getpass

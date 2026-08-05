@@ -1,4 +1,8 @@
-"""QThread workers para no congelar la UI en operaciones de red (Sparky)."""
+"""QThread workers para no congelar la UI en operaciones de red (Sparky).
+
+Los que ejecutan SQL (ExecuteRequestWorker, RerunScriptWorker) dejan el script
+en el historico con los placeholders de salt intactos: la BD es compartida.
+"""
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -48,7 +52,7 @@ class DescribeWorker(QThread):
 
 
 class ExecuteWorker(QThread):
-    """Ejecuta una lista de queries en orden (CREATE, luego INSERT)."""
+    """Ejecuta una lista de queries en orden (DROP, CREATE, INSERT)."""
 
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
@@ -141,7 +145,9 @@ class ExecuteRequestWorker(QThread):
     3. Re-resuelve la ultima particion en Impala (si falla, usa el WHERE
        snapshot de la solicitud).
     4. Construye el SQL final con las mascaras del interno, sustituye los salts
-       placeholder por los reales y ejecuta CREATE + INSERT.
+       placeholder por los reales y ejecuta DROP + CREATE + INSERT (el destino
+       se recrea desde cero en cada corrida).
+    5. Registra el script en el historico, con los placeholders sin sustituir.
     Al final marca la solicitud como ejecutada con el log completo.
     """
 

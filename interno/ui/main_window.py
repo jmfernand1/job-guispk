@@ -1,6 +1,10 @@
 """Ventana principal de la app INTERNA (PyQt6, pestanas).
 
-Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Ad-hoc.
+Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Historico | Ad-hoc.
+
+En Solicitudes el interno decide el enmascaramiento de cada columna pedida por
+el aliado y ejecuta o rechaza; en Historico consulta y re-ejecuta los scripts
+que ya corrio.
 """
 
 from PyQt6.QtCore import Qt
