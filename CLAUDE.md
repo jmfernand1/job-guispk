@@ -63,19 +63,25 @@ When spawning subagents (Agent/Task tool), the routing block is automatically in
 
 # El proyecto: reglas que no se rompen
 
-Motor de enmascaramiento con **dos apps** (interno y aliado) sobre un SQLite en carpeta
-compartida. Contexto completo en [README.md](README.md); el porque de cada decision, en
-[CHANGELOG.md](CHANGELOG.md) (indice con tags → `docs/decisiones/`).
+Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tablas
+`guispk_*` **append-only en Impala** (esquema `proceso_enmascarado`). Contexto completo en
+[README.md](README.md); el porque de cada decision, en [CHANGELOG.md](CHANGELOG.md)
+(indice con tags → `docs/decisiones/`).
 
 - **Entorno.** Tests y apps corren con el entorno conda `guispk`. El python del sistema no
   tiene pytest ni PyQt6:
   `source /opt/miniconda3/etc/profile.d/conda.sh && conda activate guispk && python -m pytest -q`
 - **Capas.** `aliado/` **nunca** importa `interno/` ni `sparky_bc` — su ejecutable se
-  construye excluyendolos. `core/` no importa Qt salvo en `core/ui/`.
-- **Secretos.** La BD compartida la leen los aliados: no puede contener credenciales ni
-  salts. El SQL se guarda con `{{TEXT_SALT}}` / `{{INT_SALT}}` y se sustituye solo al
+  construye excluyendolos; a Impala llega solo por pyodbc + su DSN. `core/` no importa Qt
+  salvo en `core/ui/`.
+- **Secretos.** Las tablas `guispk_*` las leen los aliados: no pueden contener credenciales
+  ni salts. El SQL se guarda con `{{TEXT_SALT}}` / `{{INT_SALT}}` y se sustituye solo al
   ejecutar. Hay tests que lo verifican; si uno falla, es un fallo de seguridad, no de forma.
-- **Migraciones.** Estrictamente aditivas y nunca se editan una vez publicadas: puede haber
-  un .exe viejo escribiendo en la misma BD. Se agrega una nueva al final de `MIGRATIONS`.
+- **Append-only.** Las `guispk_*` son insert-only (Impala/Parquet no soporta UPDATE): el
+  estado es el fold de eventos (`core/store/requests_repo.py`). Nunca introducir UPDATE ni
+  DELETE, y los cambios de esquema son aditivos via `_ALTERS` en `core/store/ddl.py` (nunca
+  editar DDL publicado: hay .exe viejos escribiendo en las mismas tablas).
+- **Latencia.** Toda llamada a repos desde la UI pasa por `core/ui/repo_worker.py`
+  (QThread): contra Impala cada consulta tarda segundos. No llamar repos en el hilo de UI.
 - **Quien decide que.** El aliado pide columnas; el enmascaramiento lo decide el interno y
   solo puede restringir (`core/review.py`). No aflojar esa validacion.

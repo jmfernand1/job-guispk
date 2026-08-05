@@ -3,26 +3,28 @@
 Uso normal (cluster real):
     python main_interno.py
 
-Smoke sin cluster (Sparky de mentira via fake_sparky):
+Smoke sin cluster (Sparky de mentira + coordinacion en memoria):
     python main_interno.py --fake
 
-La ruta de la BD compartida se resuelve con GUISPK_DB / config.ini
-(ver core/config.py).
+La coordinacion (catalogo, solicitudes, historico) vive en Impala, esquema
+proceso_enmascarado, tablas guispk_*; se accede con la misma conexion Sparky.
+DSN y esquema se resuelven con GUISPK_DSN / config.ini (ver core/config.py).
 """
 
 import sys
 
-from core.config import resolve_db_path
-from core.store.db import ensure_db
+from core.config import resolve_settings
 
 
-def _build_factory():
-    """Si se pasa --fake usa el stub de Sparky; si no, la Sparky real."""
+def _build_factories():
+    """Con --fake: Sparky stub + coordinacion en memoria (sin cluster)."""
     if "--fake" in sys.argv:
+        from tests.fake_impala import new_runner_with_schema
         from tests.fake_sparky import FakeSparky
 
-        return lambda u, p, d: FakeSparky(u, p, d)
-    return None
+        fake_runner = new_runner_with_schema()
+        return (lambda u, p, d: FakeSparky(u, p, d)), (lambda client: fake_runner)
+    return None, None
 
 
 def main():
@@ -30,11 +32,15 @@ def main():
 
     from interno.ui.main_window import MainWindow
 
-    db_path = resolve_db_path()
-    ensure_db(db_path)
+    settings = resolve_settings()
+    sparky_factory, store_runner_factory = _build_factories()
 
     app = QApplication(sys.argv)
-    window = MainWindow(db_path, sparky_factory=_build_factory())
+    window = MainWindow(
+        sparky_factory=sparky_factory,
+        store_runner_factory=store_runner_factory,
+        schema=settings["schema"],
+    )
     window.show()
     sys.exit(app.exec())
 

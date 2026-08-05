@@ -5,18 +5,22 @@ Motor estandarizado de enmascaramiento para un equipo mixto:
 - **Equipo interno (2 personas, acceso total a Impala):** mantiene el inventario
   de tablas autorizadas, publica el catalogo (DESCRIBE), **decide el
   enmascaramiento de cada columna** y **ejecuta** las solicitudes.
-- **Aliados (4 personas, sin acceso a zonas internas):** navegan el catalogo
-  offline, **eligen las columnas** que necesitan y crean **solicitudes
-  formales**. Solo leen la base resultado `proceso_enmascarado`.
+- **Aliados (4 personas, sin acceso a zonas internas):** navegan el catalogo,
+  **eligen las columnas** que necesitan y crean **solicitudes formales**.
+  Su unico acceso a Impala es la zona `proceso_enmascarado` (DSN ODBC con
+  credenciales propias).
 
-Ambos equipos comparten un archivo **SQLite** en una carpeta compartida
-(OneDrive / unidad de red) con el inventario, los esquemas capturados, las
-solicitudes y la auditoria.
+Ambos equipos se coordinan a traves de tablas **`guispk_*` en Impala**
+(esquema `proceso_enmascarado`, append-only): inventario, esquemas capturados,
+solicitudes con su auditoria e historico de scripts. La misma zona donde se
+escriben las tablas enmascaradas es el punto de encuentro; no hay carpeta
+compartida ni servidor propio (antes era un SQLite en OneDrive — ver
+decision [006](docs/decisiones/006-coordinacion-impala-append-only.md)).
 
 ## Flujo
 
 ```
-INTERNO                       BD COMPARTIDA                  ALIADO
+INTERNO                    IMPALA (guispk_*)               ALIADO
 Inventario + DESCRIBE  ──►  catalogo (esquemas)  ──►  navegar catalogo
                                                        elegir columnas
 Definir enmascaramiento ◄── solicitud (enviada)  ◄──  enviar solicitud
@@ -35,8 +39,9 @@ contra `fields_json` antes de ejecutar.
 
 Ciclo de vida de una solicitud:
 `borrador → enviada → ejecutada`, con `enviada → borrador` (retirar)
-y `enviada → rechazada → borrador` (corregir y reenviar). Cada movimiento queda
-en `audit_log` (quien, cuando, que).
+y `enviada → rechazada → borrador` (corregir y reenviar). Cada movimiento es un
+evento en `guispk_request_events` (quien, cuando, que): los eventos son a la
+vez el estado y la auditoria.
 
 Funciones de enmascaramiento (UDFs en la Landing Zone):
 
@@ -62,31 +67,36 @@ Funciones de enmascaramiento (UDFs en la Landing Zone):
 
 ## Modelo de datos
 
-Todo vive en el SQLite compartido (`core/store/migrations.py`, versionado por
-`PRAGMA user_version`):
+Todo vive en tablas `guispk_*` del esquema `proceso_enmascarado` en Impala
+(`core/store/ddl.py`). Son Parquet **insert-only**: Impala no soporta UPDATE,
+asi que lo vigente se deriva plegando eventos en orden.
 
 | Tabla | Guarda |
 |-------|--------|
-| `inventory` | tablas autorizadas para los aliados (alta/baja del interno) |
-| `table_schemas` | cada captura de esquema: columnas, particiones, ultima ingestion |
-| `requests` | la solicitud: estado, solicitante, revision, ejecucion y su log |
-| `request_items` | una fila por tabla pedida dentro de la solicitud |
-| `script_history` | todo script ejecutado, re-ejecutable |
-| `audit_log` | quien hizo que y cuando: `crear`, `transicion`, `decision_enmascaramiento` |
+| `guispk_inventory_events` | alta/activacion/baja de tablas autorizadas; vigente = ultimo evento por tabla |
+| `guispk_schema_captures` | cada captura de esquema: columnas, particiones, ultima ingestion |
+| `guispk_request_events` | eventos de solicitud (`crear`, `transicion`, `decision_enmascaramiento`); estado = fold de eventos, y son la auditoria |
+| `guispk_request_items` | una fila (inmutable) por tabla pedida dentro de la solicitud |
+| `guispk_script_history` | todo script ejecutado, re-ejecutable |
+
+La concurrencia se resuelve sin UPDATE: cada transicion inserta su evento con
+el `from_state` que vio; el fold ignora eventos cuyo `from_state` no coincide,
+y el proceso que "perdio" recibe `TransitionError` — igual que con el bloqueo
+optimista de antes.
 
 Dos campos de `request_items` concentran el reparto de responsabilidades:
 
 | Campo | Quien lo escribe | Contenido |
 |-------|------------------|-----------|
-| `fields_json` | aliado | `[{col, type}]` — las columnas que pidio |
-| `fields_final_json` | interno | `[{col, type, masking}]` — la mascara que decidio, ya sin las columnas excluidas |
-| `sql_preview` | aliado | el texto de la solicitud que confirmo; se regenera y compara antes de ejecutar |
+| `fields_json` (item) | aliado | `[{col, type}]` — las columnas que pidio |
+| `fields_final_json` (evento `decision_enmascaramiento`) | interno | `[{col, type, masking}]` — la mascara que decidio, ya sin las columnas excluidas |
+| `sql_preview` (item) | aliado | el texto de la solicitud que confirmo; se regenera y compara antes de ejecutar |
 
-`script_history.script` guarda el SQL **con placeholders** de salt, nunca sustituido.
+`guispk_script_history.script` guarda el SQL **con placeholders** de salt, nunca sustituido.
 
 ## Seguridad
 
-- **La BD compartida no contiene secretos**: los aliados pueden leer el archivo.
+- **Las tablas de coordinacion no contienen secretos**: los aliados las leen.
   Ni credenciales ni salts se guardan ahi.
 - El aliado no genera SQL ni elige mascaras: su solicitud es una lista de
   columnas. El SQL lo arma el interno con **placeholders** `{{TEXT_SALT}}` /
@@ -105,52 +115,75 @@ Dos campos de `request_items` concentran el reparto de responsabilidades:
 - La particion se **re-resuelve** contra Impala al momento de ejecutar y el
   WHERE realmente usado queda registrado en la solicitud.
 - El historico guarda los scripts **con placeholders**, nunca con los salts
-  reales: la BD es compartida. Al re-ejecutar se sustituyen con los salts
-  locales de la maquina interna.
+  reales: las tablas de coordinacion las leen los aliados. Al re-ejecutar se
+  sustituyen con los salts locales de la maquina interna.
 - El ejecutable del aliado se construye **sin** `sparky_bc` (ver
-  `guispk_aliado.spec`): no puede conectarse a Impala.
+  `guispk_aliado.spec`): su unico camino a Impala es pyodbc + su propio DSN,
+  con permisos SELECT + INSERT sobre las `guispk_*`. El esquema lo crea y
+  mantiene solo la app interna (`ensure_remote_schema`).
 
 ## Requisitos
 
 - Python 3.9+, `PyQt6`, `pandas` (ver `requirements.txt`)
 - Solo interno: **Sparky** (libreria interna) ya instalada en el entorno
+- Solo aliado: `pyodbc` + el DSN ODBC de Impala corporativo configurado
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Configuracion de la BD compartida
+## Configuracion de la coordinacion
 
-Orden de resolucion de la ruta (ver `core/config.py`):
+Orden de resolucion (ver `core/config.py`):
 
-1. Variable de entorno `GUISPK_DB`
+1. Variables de entorno `GUISPK_DSN` / `GUISPK_SCHEMA`
 2. `config.ini` junto al ejecutable (ver `config.ini.example`)
-3. `~/.guispk/guispk.db` (fallback de desarrollo)
+3. Default: DSN vacio (la UI lo pide al conectar), esquema `proceso_enmascarado`
 
-> OneDrive: marcar la carpeta como **"Conservar siempre en este dispositivo"**
-> y evitar editar sin conexion (riesgo de conflictos de sincronizacion). La app
-> usa `journal_mode=DELETE` + transacciones cortas porque WAL no es confiable
-> en carpetas de red; con 6 usuarios y escrituras esporadicas es suficiente.
+El `config.ini` **nunca** lleva credenciales: usuario y password se piden al
+arrancar (precargados de `USERNAME` / `PSWD` / `DSNLZ` si existen).
 
-## Variables de entorno (solo interno)
+Permisos que necesita cada rol sobre `proceso_enmascarado`:
+
+| Rol | Permisos |
+|-----|----------|
+| interno | CREATE (una vez, para las `guispk_*`) + SELECT/INSERT/DROP en la zona |
+| aliado | SELECT + INSERT sobre las `guispk_*`; SELECT sobre las tablas `_enm` |
+
+## Variables de entorno
 
 | Variable | Uso |
 |----------|-----|
-| `USERNAME` | usuario de conexion |
+| `USERNAME` | usuario de conexion (interno y aliado) |
 | `PSWD` | contrasena |
-| `DSNLZ` | DSN de la Landing Zone |
+| `DSNLZ` | DSN por defecto para el prefill de conexion |
 
 ## Ejecutar
 
 ```bash
 python main_interno.py          # app interna (cluster real via Sparky)
-python main_interno.py --fake   # app interna sin cluster (stub de Sparky)
-python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
+python main_interno.py --fake   # app interna sin cluster (stubs en memoria)
+python main_aliado.py           # app aliado (pide credenciales de Impala)
+python main_aliado.py --fake    # app aliado sin cluster (store en memoria)
 ```
+
+## Migrar desde el SQLite compartido (una sola vez)
+
+```bash
+python -m tools.migrate_sqlite_to_impala "~/OneDrive - Empresa/enmascarado/guispk.db"
+```
+
+Lo corre una persona del equipo interno tras coordinar el corte: migra
+inventario, ultima captura por tabla, historico completo y solicitudes en
+estado final. Las pendientes (`borrador`/`enviada`) se recrean a mano.
+`--dry-run` muestra los contadores sin conectar. Despues, archivar el
+`guispk.db` como solo-lectura.
 
 ### App interna (pestanas)
 
-1. **Conexion** — credenciales Sparky/Impala.
+1. **Conexion** — credenciales Sparky/Impala. Al conectar se asegura el
+   esquema `guispk_*` y recien entonces cargan las demas pestanas (la
+   coordinacion vive en Impala).
 2. **Inventario** — alta/baja de tablas autorizadas para los aliados.
 3. **Catalogo** — *Actualizar catalogo* corre DESCRIBE + SHOW PARTITIONS +
    ultima ingestion de cada tabla activa y publica los esquemas.
@@ -167,6 +200,8 @@ python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
 
 ### App aliado (pestanas)
 
+Al arrancar pide usuario/contrasena/DSN de Impala (dialogo modal).
+
 1. **Nueva solicitud** — elegir tabla del catalogo, marcar las columnas que
    necesita, generar la vista previa y *Guardar borrador* o *Enviar*. El
    enmascaramiento no se elige aqui.
@@ -177,10 +212,10 @@ python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
 
 ```bash
 pyinstaller guispk_interno.spec
-pyinstaller guispk_aliado.spec   # excluye sparky_bc e interno/
+pyinstaller guispk_aliado.spec   # excluye sparky_bc e interno/; incluye pyodbc
 ```
 
-Distribuir cada exe con su `config.ini` apuntando a la BD compartida.
+Distribuir cada exe con su `config.ini` (DSN + esquema; nunca credenciales).
 
 ## Tests
 
@@ -188,7 +223,8 @@ Distribuir cada exe con su `config.ini` apuntando a la BD compartida.
 python -m pytest tests/ -v
 ```
 
-Sin red ni cluster (53 tests):
+Sin red ni cluster (56 tests). Los repos corren contra `tests/fake_impala.py`,
+un runner que ejecuta el mismo SQL sobre sqlite3 en memoria:
 
 | Archivo | Cubre |
 |---------|-------|
@@ -196,7 +232,7 @@ Sin red ni cluster (53 tests):
 | `test_sql_builder.py` | DROP/CREATE/INSERT, vista previa, `split_statements` |
 | `test_regeneration.py` | verificacion anti-alteracion y que el SQL final lleve la decision del interno |
 | `test_review.py` | el interno solo puede restringir: nada de columnas no pedidas |
-| `test_store.py` | migraciones, repos, ciclo de vida y concurrencia |
+| `test_store.py` | repos append-only, fold de eventos, ciclo de vida y carreras |
 | `test_history.py` | historico y que el script guardado nunca lleve salts reales |
 | `test_states.py` | maquina de estados y roles |
 
@@ -208,15 +244,19 @@ core/                    nucleo compartido (sin Sparky)
   sql_builder.py         DROP + CREATE + INSERT (+ vista previa de la solicitud)
   review.py              reglas de la decision del interno sobre lo solicitado
   states.py              maquina de estados de solicitudes
-  config.py              resolucion de la ruta de la BD compartida
-  models.py              serializacion JSON de campos/esquemas
-  store/                 SQLite: db, migraciones, catalog/requests/history repos
-  ui/                    widgets compartidos: column_table, catalog_browser
-interno/                 app interna: sparky_client, salts, workers, ui/
-aliado/                  app aliado: ui/ (nunca importa interno/)
+  config.py              resolucion de DSN y esquema de coordinacion
+  models.py              serializacion JSON de campos/esquemas + ids ordenables
+  store/                 coordinacion en Impala: ddl, runner, repos append-only
+                         (db.py y migrations.py quedan solo para la migracion)
+  ui/                    widgets compartidos: column_table, catalog_browser,
+                         repo_worker (toda llamada a repos corre en QThread)
+interno/                 app interna: sparky_client, sparky_runner, salts, ui/
+aliado/                  app aliado: impala_client (pyodbc), ui/ con dialogo de
+                         conexion (nunca importa interno/ ni sparky_bc)
 main_interno.py          entrada app interna (--fake para smoke)
-main_aliado.py           entrada app aliado
-tests/                   pytest + fake_sparky (stub con .helper)
+main_aliado.py           entrada app aliado (--fake para smoke)
+tools/                   migrate_sqlite_to_impala (import unico del guispk.db)
+tests/                   pytest + fake_sparky + fake_impala
 docs/decisiones/         una decision de diseno por archivo (ver CHANGELOG.md)
 ```
 

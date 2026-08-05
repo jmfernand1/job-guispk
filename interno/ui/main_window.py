@@ -29,13 +29,16 @@ from PyQt6.QtWidgets import (
 )
 
 from core import review, states
+from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
 from core.store.history_repo import HistoryRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
 from core.ui.column_table import ColumnTable
+from core.ui.repo_worker import AsyncRepoMixin
 from interno import salts as salts_mod
 from interno.sparky_client import SparkyClient, credentials_from_env
+from interno.sparky_runner import SparkyRunner
 from interno.ui.adhoc_panel import AdHocPanel
 from interno.workers import (
     CatalogRefreshWorker,
@@ -47,21 +50,37 @@ from interno.workers import (
 _STATE_FILTER_ALL = "todas"
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, db_path, sparky_factory=None):
+class MainWindow(QMainWindow, AsyncRepoMixin):
+    """La coordinacion vive en Impala: los repos existen solo tras conectar.
+
+    Al conectar a Sparky se construye el runner de coordinacion (por defecto
+    SparkyRunner sobre la misma conexion), se asegura el esquema guispk_* y
+    recien entonces se cargan inventario/catalogo/solicitudes/historico.
+    """
+
+    def __init__(
+        self,
+        sparky_factory=None,
+        store_runner_factory=None,
+        schema: str = ddl.DEFAULT_SCHEMA,
+    ):
         super().__init__()
         self.setWindowTitle("Enmascarador de datos - INTERNO")
         self.resize(1100, 820)
 
         self.client = SparkyClient(sparky_factory=sparky_factory)
-        self.catalog_repo = CatalogRepo(db_path)
-        self.requests_repo = RequestsRepo(db_path)
-        self.history_repo = HistoryRepo(db_path)
+        self._store_runner_factory = store_runner_factory or SparkyRunner
+        self._schema = schema
+        self.catalog_repo = None
+        self.requests_repo = None
+        self.history_repo = None
         self._worker = None
         self._current_request = None
         self._item_tables = []
         self._history = []
         self._current_script = None
+        self._inventory = []
+        self._requests = []
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -74,25 +93,37 @@ class MainWindow(QMainWindow):
             AdHocPanel(
                 self.client,
                 self._set_status,
-                history_repo=self.history_repo,
+                history_cb=lambda: self.history_repo,
                 who_cb=self._who,
             ),
             "Ad-hoc",
         )
 
-        self.status_label = QLabel("Listo.")
+        self.status_label = QLabel("Conecta a Sparky para cargar la coordinacion.")
         self.statusBar().addWidget(self.status_label)
-
-        self._reload_inventory()
-        self._reload_catalog()
-        self._reload_requests()
-        self._reload_history()
 
     def _set_status(self, msg):
         self.status_label.setText(msg)
 
     def _who(self):
         return self.user_edit.text().strip() or "interno"
+
+    @property
+    def _store_ready(self) -> bool:
+        return self.requests_repo is not None
+
+    def _require_store(self) -> bool:
+        if not self._store_ready:
+            QMessageBox.warning(
+                self, "Sin conexion", "Conecta a Sparky primero: la "
+                "coordinacion (catalogo, solicitudes, historico) vive en Impala."
+            )
+            return False
+        return True
+
+    def _show_store_error(self, msg):
+        self._set_status("Error de coordinacion.")
+        QMessageBox.critical(self, "Coordinacion (Impala)", msg)
 
     # ======================================================================
     # Tab 1: Conexion
@@ -141,9 +172,37 @@ class MainWindow(QMainWindow):
         self._worker.start()
 
     def _on_connected(self, msg):
+        self.conn_status.setText("Conectado. Preparando coordinacion...")
+        self._set_status(msg)
+        # El esquema guispk_* lo crea/asegura SOLO la app interna; los aliados
+        # operan con SELECT + INSERT. Corre en worker: son varios DDL a Impala.
+        client, schema = self.client, self._schema
+        factory = self._store_runner_factory
+
+        def _init_store():
+            runner = factory(client)
+            ddl.ensure_remote_schema(runner, schema)
+            return runner
+
+        self._run_async(_init_store, self._on_store_ready, self._on_store_error)
+
+    def _on_store_ready(self, runner):
+        self.catalog_repo = CatalogRepo(runner, self._schema)
+        self.requests_repo = RequestsRepo(runner, self._schema)
+        self.history_repo = HistoryRepo(runner, self._schema)
         self.connect_btn.setEnabled(True)
         self.conn_status.setText("Conectado")
-        self._set_status(msg)
+        self._set_status("Coordinacion lista.")
+        self._reload_inventory()
+        self._reload_catalog()
+        self._reload_requests()
+        self._reload_history()
+
+    def _on_store_error(self, msg):
+        self.connect_btn.setEnabled(True)
+        self.conn_status.setText("Error")
+        self._set_status(f"Error preparando la coordinacion: {msg}")
+        QMessageBox.critical(self, "Coordinacion (Impala)", msg)
 
     def _on_connect_error(self, msg):
         self.connect_btn.setEnabled(True)
@@ -188,7 +247,16 @@ class MainWindow(QMainWindow):
         return page
 
     def _reload_inventory(self):
-        self._inventory = self.catalog_repo.list_inventory()
+        if not self._store_ready:
+            return
+        self._run_async(
+            self.catalog_repo.list_inventory,
+            self._on_inventory_loaded,
+            self._show_store_error,
+        )
+
+    def _on_inventory_loaded(self, inventory):
+        self._inventory = inventory
         self.inv_table.setRowCount(0)
         for e in self._inventory:
             row = self.inv_table.rowCount()
@@ -208,11 +276,19 @@ class MainWindow(QMainWindow):
         if not name:
             QMessageBox.warning(self, "Falta tabla", "Indica esquema.tabla.")
             return
-        try:
-            self.catalog_repo.add_table(name, self.inv_desc_edit.text(), self._who())
-        except Exception as exc:  # noqa: BLE001 - p.ej. UNIQUE
-            QMessageBox.critical(self, "No se pudo agregar", str(exc))
+        if not self._require_store():
             return
+        if any(e["table_name"] == name for e in self._inventory):
+            QMessageBox.warning(self, "Ya existe", f"{name} ya esta en el inventario.")
+            return
+        desc, who = self.inv_desc_edit.text(), self._who()
+        self._run_async(
+            lambda: self.catalog_repo.add_table(name, desc, who),
+            lambda _: self._on_inventory_added(name),
+            self._show_store_error,
+        )
+
+    def _on_inventory_added(self, name):
         self.inv_name_edit.clear()
         self.inv_desc_edit.clear()
         self._reload_inventory()
@@ -222,10 +298,16 @@ class MainWindow(QMainWindow):
         row = self.inv_table.currentRow()
         if row < 0 or row >= len(self._inventory):
             return
-        entry = self._inventory[row]
-        self.catalog_repo.set_active(entry["id"], not entry["active"])
-        self._reload_inventory()
-        self._reload_catalog()
+        if not self._require_store():
+            return
+        entry, who = self._inventory[row], self._who()
+        self._run_async(
+            lambda: self.catalog_repo.set_active(
+                entry["id"], not entry["active"], who
+            ),
+            lambda _: (self._reload_inventory(), self._reload_catalog()),
+            self._show_store_error,
+        )
 
     # ======================================================================
     # Tab 3: Catalogo
@@ -255,11 +337,16 @@ class MainWindow(QMainWindow):
         return page
 
     def _reload_catalog(self):
-        self.catalog_browser.load(self.catalog_repo.latest_schemas())
+        if not self._store_ready:
+            return
+        self._run_async(
+            self.catalog_repo.latest_schemas,
+            self.catalog_browser.load,
+            self._show_store_error,
+        )
 
     def on_catalog_refresh(self):
-        if not self.client.connected:
-            QMessageBox.warning(self, "Sin conexion", "Conecta a Sparky primero.")
+        if not self.client.connected or not self._require_store():
             return
         self.refresh_catalog_btn.setEnabled(False)
         self._worker = CatalogRefreshWorker(self.client, self.catalog_repo, self._who())
@@ -352,9 +439,18 @@ class MainWindow(QMainWindow):
         return page
 
     def _reload_requests(self):
+        if not self._store_ready:
+            return
         state = self.state_filter.currentText()
         state = None if state == _STATE_FILTER_ALL else state
-        self._requests = self.requests_repo.list_requests(state=state)
+        self._run_async(
+            lambda: self.requests_repo.list_requests(state=state),
+            self._on_requests_loaded,
+            self._show_store_error,
+        )
+
+    def _on_requests_loaded(self, requests):
+        self._requests = requests
         self.req_table.setRowCount(0)
         for r in self._requests:
             row = self.req_table.rowCount()
@@ -378,12 +474,22 @@ class MainWindow(QMainWindow):
         row = self.req_table.currentRow()
         if row < 0 or row >= len(self._requests):
             return
-        self._current_request = self.requests_repo.get_request(
-            self._requests[row]["id"]
+        request_id = self._requests[row]["id"]
+        self._set_status("Cargando solicitud...")
+        self._run_async(
+            lambda: self.requests_repo.get_request(request_id),
+            self._on_request_detail_loaded,
+            self._show_store_error,
         )
-        self.req_detail.setPlainText(_render_request(self._current_request))
-        self._load_item_tables(self._current_request)
+
+    def _on_request_detail_loaded(self, req):
+        if req is None:
+            return
+        self._current_request = req
+        self.req_detail.setPlainText(_render_request(req))
+        self._load_item_tables(req)
         self._update_request_buttons()
+        self._set_status("Listo.")
 
     def _load_item_tables(self, req):
         """Una ColumnTable por item, precargada con la decision guardada o lo pedido."""
@@ -411,16 +517,17 @@ class MainWindow(QMainWindow):
         self.reject_btn.setEnabled(state == states.ENVIADA)
 
     def _do_transition(self, to_state, comment=None):
-        try:
-            self.requests_repo.transition(
-                self._current_request["id"],
-                to_state,
-                self._who(),
-                states.ROLE_INTERNO,
-                comment=comment,
-            )
-        except states.TransitionError as exc:
-            QMessageBox.warning(self, "No se pudo", str(exc))
+        request_id, who = self._current_request["id"], self._who()
+        self._run_async(
+            lambda: self.requests_repo.transition(
+                request_id, to_state, who, states.ROLE_INTERNO, comment=comment
+            ),
+            lambda _: self._reload_requests(),
+            self._on_transition_error,
+        )
+
+    def _on_transition_error(self, msg):
+        QMessageBox.warning(self, "No se pudo", msg)
         self._reload_requests()
 
     def on_reject(self):
@@ -490,9 +597,17 @@ class MainWindow(QMainWindow):
         return page
 
     def _reload_history(self):
-        self._history = self.history_repo.list_scripts(
-            search=self.history_search.text()
+        if not self._store_ready:
+            return
+        search = self.history_search.text()
+        self._run_async(
+            lambda: self.history_repo.list_scripts(search=search),
+            self._on_history_loaded,
+            self._show_store_error,
         )
+
+    def _on_history_loaded(self, history):
+        self._history = history
         self.history_table.setRowCount(0)
         for h in self._history:
             row = self.history_table.rowCount()
@@ -644,17 +759,27 @@ class MainWindow(QMainWindow):
             return
         # Se persiste la decision antes de ejecutar: queda auditada aunque la
         # ejecucion falle, y al recargar el interno recupera su seleccion.
-        try:
-            for item, fields in zip(req["items"], decisions):
-                self.requests_repo.set_item_final_fields(
-                    item["id"], fields, self._who()
-                )
-        except states.TransitionError as exc:
-            QMessageBox.warning(self, "No se pudo", str(exc))
-            self._reload_requests()
-            return
-        req = self.requests_repo.get_request(req["id"])
         self.execute_btn.setEnabled(False)
+        repo, who, items = self.requests_repo, self._who(), req["items"]
+
+        def _persist_decisions():
+            for item, fields in zip(items, decisions):
+                repo.set_item_final_fields(item["id"], fields, who)
+            return repo.get_request(req["id"])
+
+        self._set_status("Registrando la decision de enmascaramiento...")
+        self._run_async(
+            _persist_decisions,
+            lambda fresh: self._start_execution(fresh, salts),
+            self._on_persist_decisions_error,
+        )
+
+    def _on_persist_decisions_error(self, msg):
+        self.execute_btn.setEnabled(True)
+        QMessageBox.warning(self, "No se pudo", msg)
+        self._reload_requests()
+
+    def _start_execution(self, req, salts):
         self._worker = ExecuteRequestWorker(
             self.client,
             self.requests_repo,

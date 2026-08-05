@@ -1,12 +1,12 @@
-"""Tests de la capa de persistencia contra una BD en tmp_path."""
+"""Tests de la capa de persistencia contra el runner falso de Impala."""
 
 import pytest
 
-from core import models, states
+from core import states
+from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
-from core.store.db import ensure_db, open_db
-from core.store.migrations import MIGRATIONS
 from core.store.requests_repo import RequestsRepo
+from tests.fake_impala import new_runner_with_schema
 
 # lo que pide el aliado: columnas sin enmascaramiento
 FIELDS = [
@@ -21,41 +21,18 @@ FIELDS_FINAL = [
 
 
 @pytest.fixture
-def db_path(tmp_path):
-    path = str(tmp_path / "guispk.db")
-    ensure_db(path)
-    return path
+def runner():
+    return new_runner_with_schema()
 
 
-def test_migrations_idempotent(db_path):
-    ensure_db(db_path)  # segunda llamada no debe fallar ni duplicar
-    with open_db(db_path) as con:
-        version = con.execute("PRAGMA user_version").fetchone()[0]
-    assert version == len(MIGRATIONS)
+def test_ensure_remote_schema_idempotent(runner):
+    ddl.ensure_remote_schema(runner)  # segunda llamada no debe fallar
+    # y las tablas responden vacias
+    assert runner.query(f"SELECT * FROM {ddl.qname('request_events')}") == []
 
 
-def test_v2_backfills_fields_final(tmp_path):
-    """Una BD en V1 migra a V2 conservando la mascara vieja como decision final."""
-    path = str(tmp_path / "vieja.db")
-    with open_db(path) as con:
-        con.executescript(MIGRATIONS[0])
-        con.execute("PRAGMA user_version = 1")
-        con.execute(
-            "INSERT INTO requests (code, state, requester, created_at) "
-            "VALUES ('REQ-1', 'enviada', 'aliado1', '2026-01-01T00:00:00Z')"
-        )
-        con.execute(
-            "INSERT INTO request_items (request_id, src_table, dest_table, "
-            "fields_json, sql_preview) VALUES (1, 'lz.t', 'p.t_enm', ?, '-- sql')",
-            (models.fields_to_json(FIELDS_FINAL),),
-        )
-    ensure_db(path)
-    item = RequestsRepo(path).get_request(1)["items"][0]
-    assert item["fields_final"] == FIELDS_FINAL
-
-
-def test_inventory_and_capture_roundtrip(db_path):
-    repo = CatalogRepo(db_path)
+def test_inventory_and_capture_roundtrip(runner):
+    repo = CatalogRepo(runner)
     inv_id = repo.add_table("lz.clientes", "tabla de clientes", "interno1")
     repo.save_schema_capture(
         inv_id,
@@ -77,19 +54,32 @@ def test_inventory_and_capture_roundtrip(db_path):
     assert repo.latest_schemas()[0]["capture_id"] == cap2
 
     # desactivar la tabla la saca del catalogo del aliado
-    repo.set_active(inv_id, False)
+    repo.set_active(inv_id, False, "interno1")
     assert repo.latest_schemas() == []
 
+    # y reactivarla la devuelve (el fold aplica el ultimo evento)
+    repo.set_active(inv_id, True, "interno1")
+    assert repo.latest_schemas()[0]["table_name"] == "lz.clientes"
 
-def test_uncaptured_table_listed_pending(db_path):
-    repo = CatalogRepo(db_path)
+
+def test_uncaptured_table_listed_pending(runner):
+    repo = CatalogRepo(runner)
     repo.add_table("lz.sin_captura", "", "interno1")
     entry = repo.latest_schemas()[0]
     assert entry["capture_id"] is None
 
 
-def _new_request_with_item(db_path, requester="aliado1"):
-    repo = RequestsRepo(db_path)
+def test_get_capture_includes_table_name(runner):
+    repo = CatalogRepo(runner)
+    inv_id = repo.add_table("lz.clientes", "", "interno1")
+    cap_id = repo.save_schema_capture(inv_id, "interno1", [("a", "string")])
+    cap = repo.get_capture(cap_id)
+    assert cap["table_name"] == "lz.clientes"
+    assert repo.get_capture("no-existe") is None
+
+
+def _new_request_with_item(runner, requester="aliado1"):
+    repo = RequestsRepo(runner)
     req = repo.create_request(requester)
     repo.add_item(
         req["id"], "lz.clientes", "proceso_enmascarado.clientes_enm",
@@ -98,8 +88,8 @@ def _new_request_with_item(db_path, requester="aliado1"):
     return repo, req
 
 
-def test_request_lifecycle(db_path):
-    repo, req = _new_request_with_item(db_path)
+def test_request_lifecycle(runner):
+    repo, req = _new_request_with_item(runner)
     assert req["code"].startswith("REQ-")
 
     repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
@@ -122,14 +112,14 @@ def test_request_lifecycle(db_path):
     assert actions == ["crear", "transicion", "transicion"]
 
 
-def test_item_starts_without_final_fields(db_path):
+def test_item_starts_without_final_fields(runner):
     """Lo que crea el aliado no trae decision de enmascaramiento."""
-    repo, req = _new_request_with_item(db_path)
+    repo, req = _new_request_with_item(runner)
     assert repo.get_request(req["id"])["items"][0]["fields_final"] is None
 
 
-def test_set_item_final_fields_persists_and_audits(db_path):
-    repo, req = _new_request_with_item(db_path)
+def test_set_item_final_fields_persists_and_audits(runner):
+    repo, req = _new_request_with_item(runner)
     repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
     item_id = repo.get_request(req["id"])["items"][0]["id"]
 
@@ -142,16 +132,26 @@ def test_set_item_final_fields_persists_and_audits(db_path):
     assert "decision_enmascaramiento" in actions
 
 
-def test_set_item_final_fields_requires_enviada(db_path):
+def test_final_fields_survive_execution(runner):
+    """La decision tomada en enviada sigue visible tras ejecutar."""
+    repo, req = _new_request_with_item(runner)
+    repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
+    item_id = repo.get_request(req["id"])["items"][0]["id"]
+    repo.set_item_final_fields(item_id, FIELDS_FINAL, "interno1")
+    repo.transition(req["id"], states.EJECUTADA, "interno1", states.ROLE_INTERNO)
+    assert repo.get_request(req["id"])["items"][0]["fields_final"] == FIELDS_FINAL
+
+
+def test_set_item_final_fields_requires_enviada(runner):
     """En borrador (o ya ejecutada) no se puede pisar la decision."""
-    repo, req = _new_request_with_item(db_path)
+    repo, req = _new_request_with_item(runner)
     item_id = repo.get_request(req["id"])["items"][0]["id"]
     with pytest.raises(states.TransitionError):
         repo.set_item_final_fields(item_id, FIELDS_FINAL, "interno1")
 
 
-def test_invalid_transition_rejected(db_path):
-    repo, req = _new_request_with_item(db_path)
+def test_invalid_transition_rejected(runner):
+    repo, req = _new_request_with_item(runner)
     with pytest.raises(states.TransitionError):
         repo.transition(req["id"], states.EJECUTADA, "interno1", states.ROLE_INTERNO)
     # rol equivocado
@@ -160,8 +160,8 @@ def test_invalid_transition_rejected(db_path):
     assert repo.get_request(req["id"])["state"] == states.BORRADOR
 
 
-def test_reject_and_resubmit(db_path):
-    repo, req = _new_request_with_item(db_path)
+def test_reject_and_resubmit(runner):
+    repo, req = _new_request_with_item(runner)
     repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
     repo.transition(
         req["id"], states.RECHAZADA, "interno1", states.ROLE_INTERNO,
@@ -173,10 +173,10 @@ def test_reject_and_resubmit(db_path):
     assert repo.get_request(req["id"])["state"] == states.ENVIADA
 
 
-def test_concurrent_transition_fails_clean(db_path):
+def test_concurrent_transition_fails_clean(runner):
     """Dos procesos moviendo la misma solicitud: el segundo falla limpio."""
-    repo_a, req = _new_request_with_item(db_path)
-    repo_b = RequestsRepo(db_path)  # simula el otro proceso
+    repo_a, req = _new_request_with_item(runner)
+    repo_b = RequestsRepo(runner)  # simula el otro proceso
 
     repo_a.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
     # el "otro proceso" retira la solicitud primero
@@ -186,8 +186,44 @@ def test_concurrent_transition_fails_clean(db_path):
         repo_a.transition(req["id"], states.EJECUTADA, "interno1", states.ROLE_INTERNO)
 
 
-def test_request_codes_are_sequential(db_path):
-    repo = RequestsRepo(db_path)
+def test_race_lost_event_is_ignored_by_fold(runner):
+    """Un evento que perdio la carrera queda inerte: el fold no lo aplica.
+
+    Simula la carrera insertando a mano un evento 'transicion' con from_state
+    viejo (como si otro proceso hubiera derivado el estado antes del INSERT
+    ganador): el estado no cambia y la auditoria no lo registra.
+    """
+    repo, req = _new_request_with_item(runner)
+    repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
+    repo.transition(req["id"], states.BORRADOR, "aliado1", states.ROLE_ALIADO)
+
+    # evento perdedor: cree que la solicitud sigue enviada
+    repo._insert_event(
+        request_id=req["id"], code=req["code"], who="interno1",
+        role=states.ROLE_INTERNO, event_type="transicion",
+        from_state=states.ENVIADA, to_state=states.EJECUTADA,
+    )
+    final = repo.get_request(req["id"])
+    assert final["state"] == states.BORRADOR
+    assert final["executed_by"] is None
+    actions = [a["action"] for a in repo.audit_trail(req["id"])]
+    assert actions == ["crear", "transicion", "transicion"]
+
+
+def test_list_requests_filters(runner):
+    repo, req1 = _new_request_with_item(runner, requester="aliado1")
+    _, req2 = _new_request_with_item(runner, requester="aliado2")
+    repo.transition(req2["id"], states.ENVIADA, "aliado2", states.ROLE_ALIADO)
+
+    assert {r["code"] for r in repo.list_requests()} == {req1["code"], req2["code"]}
+    enviadas = repo.list_requests(state=states.ENVIADA)
+    assert [r["code"] for r in enviadas] == [req2["code"]]
+    de_aliado1 = repo.list_requests(requester="aliado1")
+    assert [r["code"] for r in de_aliado1] == [req1["code"]]
+
+
+def test_request_codes_are_unique(runner):
+    repo = RequestsRepo(runner)
     first = repo.create_request("aliado1")
     second = repo.create_request("aliado2")
     assert first["code"] != second["code"]

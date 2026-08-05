@@ -1,94 +1,160 @@
-"""Repositorio del catalogo: inventario de tablas autorizadas + capturas DESCRIBE."""
+"""Repositorio del catalogo sobre Impala: inventario + capturas DESCRIBE.
+
+Append-only: el inventario es una tabla de eventos (add/activate/deactivate)
+y lo vigente por tabla es el resultado de plegarlos en orden. Las capturas ya
+eran historicas por naturaleza; la vigente es la ultima por table_name.
+
+El identificador de inventario pasa a ser el propio table_name (antes era el
+rowid de SQLite): los metodos conservan el parametro `inventory_id` pero
+reciben el nombre de la tabla.
+"""
 
 import json
 
 from core import models
-from core.store.db import open_db
+from core.store import ddl
+
+_EV_ADD = "add"
+_EV_ACTIVATE = "activate"
+_EV_DEACTIVATE = "deactivate"
 
 
 class CatalogRepo:
-    def __init__(self, db_path: str):
-        self._path = db_path
+    def __init__(self, runner, schema: str = ddl.DEFAULT_SCHEMA):
+        self._runner = runner
+        self._inventory_t = ddl.qname("inventory_events", schema)
+        self._captures_t = ddl.qname("schema_captures", schema)
 
     # -- inventario ----------------------------------------------------------
-    def add_table(self, table_name: str, description: str, added_by: str) -> int:
-        with open_db(self._path) as con:
-            cur = con.execute(
-                "INSERT INTO inventory (table_name, description, active, added_by, added_at) "
-                "VALUES (?, ?, 1, ?, ?)",
-                (table_name.strip(), description.strip(), added_by, models.utcnow_iso()),
-            )
-            return cur.lastrowid
+    def _insert_inventory_event(self, event_type, table_name, who, description=None):
+        self._runner.execute(
+            f"INSERT INTO {self._inventory_t} (event_id, at, who, event_type, "
+            "table_name, description) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                models.new_id(),
+                models.utcnow_iso(),
+                who,
+                event_type,
+                table_name,
+                description,
+            ),
+        )
 
-    def set_active(self, inventory_id: int, active: bool):
-        with open_db(self._path) as con:
-            con.execute(
-                "UPDATE inventory SET active = ? WHERE id = ?",
-                (1 if active else 0, inventory_id),
-            )
+    def add_table(self, table_name: str, description: str, added_by: str) -> str:
+        name = table_name.strip()
+        self._insert_inventory_event(_EV_ADD, name, added_by, description.strip())
+        return name
+
+    def set_active(self, inventory_id: str, active: bool, who: str = ""):
+        self._insert_inventory_event(
+            _EV_ACTIVATE if active else _EV_DEACTIVATE, inventory_id, who
+        )
+
+    def _fold_inventory(self):
+        rows = self._runner.query(f"SELECT * FROM {self._inventory_t}")
+        rows.sort(key=lambda e: (e["at"] or "", e["event_id"]))
+        tables = {}
+        for e in rows:
+            name = e["table_name"]
+            if e["event_type"] == _EV_ADD:
+                if name in tables:
+                    continue  # alta duplicada: gana la primera
+                tables[name] = {
+                    "id": name,
+                    "table_name": name,
+                    "description": e["description"],
+                    "active": 1,
+                    "added_by": e["who"],
+                    "added_at": e["at"],
+                }
+            elif name in tables:
+                tables[name]["active"] = (
+                    1 if e["event_type"] == _EV_ACTIVATE else 0
+                )
+        return tables
 
     def list_inventory(self, active_only: bool = False):
-        query = "SELECT * FROM inventory"
+        rows = list(self._fold_inventory().values())
         if active_only:
-            query += " WHERE active = 1"
-        query += " ORDER BY table_name"
-        with open_db(self._path) as con:
-            return [dict(r) for r in con.execute(query)]
+            rows = [r for r in rows if r["active"]]
+        rows.sort(key=lambda r: r["table_name"])
+        return rows
 
     # -- capturas de esquema -------------------------------------------------
     def save_schema_capture(
         self,
-        inventory_id: int,
+        inventory_id: str,
         captured_by: str,
         columns,
         partition_cols=None,
         last_partition_where=None,
         last_ingest=None,
-    ) -> int:
-        with open_db(self._path) as con:
-            cur = con.execute(
-                "INSERT INTO table_schemas (inventory_id, captured_at, captured_by, "
-                "columns_json, partition_cols_json, last_partition_where, last_ingest) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    inventory_id,
-                    models.utcnow_iso(),
-                    captured_by,
-                    models.columns_to_json(columns),
-                    json.dumps(partition_cols) if partition_cols else None,
-                    last_partition_where,
-                    last_ingest,
-                ),
-            )
-            return cur.lastrowid
+    ) -> str:
+        capture_id = models.new_id()
+        self._runner.execute(
+            f"INSERT INTO {self._captures_t} (capture_id, table_name, "
+            "captured_at, captured_by, columns_json, partition_cols_json, "
+            "last_partition_where, last_ingest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                capture_id,
+                inventory_id,
+                models.utcnow_iso(),
+                captured_by,
+                models.columns_to_json(columns),
+                json.dumps(partition_cols) if partition_cols else None,
+                last_partition_where,
+                last_ingest,
+            ),
+        )
+        return capture_id
+
+    def _latest_captures(self):
+        """Ultima captura por tabla (window function: corre en Impala y SQLite)."""
+        rows = self._runner.query(
+            f"""
+            SELECT * FROM (
+              SELECT c.*, ROW_NUMBER() OVER (
+                PARTITION BY table_name
+                ORDER BY captured_at DESC, capture_id DESC
+              ) AS rn
+              FROM {self._captures_t} c
+            ) t WHERE rn = 1
+            """
+        )
+        return {r["table_name"]: r for r in rows}
 
     def latest_schemas(self):
         """Ultima captura por tabla activa del inventario (para el aliado).
 
         Tablas sin captura aparecen con capture_id NULL (pendientes de refresh).
         """
-        query = """
-            SELECT i.id AS inventory_id, i.table_name, i.description,
-                   s.id AS capture_id, s.captured_at, s.captured_by,
-                   s.columns_json, s.partition_cols_json,
-                   s.last_partition_where, s.last_ingest
-            FROM inventory i
-            LEFT JOIN table_schemas s ON s.id = (
-                SELECT s2.id FROM table_schemas s2
-                WHERE s2.inventory_id = i.id
-                ORDER BY s2.captured_at DESC, s2.id DESC LIMIT 1
+        captures = self._latest_captures()
+        result = []
+        for inv in self.list_inventory(active_only=True):
+            cap = captures.get(inv["table_name"])
+            result.append(
+                {
+                    "inventory_id": inv["id"],
+                    "table_name": inv["table_name"],
+                    "description": inv["description"],
+                    "capture_id": cap["capture_id"] if cap else None,
+                    "captured_at": cap["captured_at"] if cap else None,
+                    "captured_by": cap["captured_by"] if cap else None,
+                    "columns_json": cap["columns_json"] if cap else None,
+                    "partition_cols_json": cap["partition_cols_json"] if cap else None,
+                    "last_partition_where": cap["last_partition_where"] if cap else None,
+                    "last_ingest": cap["last_ingest"] if cap else None,
+                }
             )
-            WHERE i.active = 1
-            ORDER BY i.table_name
-        """
-        with open_db(self._path) as con:
-            return [dict(r) for r in con.execute(query)]
+        return result
 
-    def get_capture(self, capture_id: int):
-        with open_db(self._path) as con:
-            row = con.execute(
-                "SELECT s.*, i.table_name FROM table_schemas s "
-                "JOIN inventory i ON i.id = s.inventory_id WHERE s.id = ?",
-                (capture_id,),
-            ).fetchone()
-            return dict(row) if row else None
+    def get_capture(self, capture_id: str):
+        rows = self._runner.query(
+            f"SELECT * FROM {self._captures_t} WHERE capture_id = ?",
+            (capture_id,),
+        )
+        if not rows:
+            return None
+        row = dict(rows[0])
+        row["id"] = row["capture_id"]
+        return row

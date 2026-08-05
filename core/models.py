@@ -1,12 +1,25 @@
 """Serializacion de campos y helpers comunes a los repos."""
 
 import json
+import uuid
 from datetime import datetime, timezone
 
 
 def utcnow_iso() -> str:
     """Timestamp ISO-8601 en UTC, segundos enteros (auditable y ordenable)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def new_id() -> str:
+    """Id unico ordenable por tiempo (microsegundos UTC + azar).
+
+    El fold de eventos ordena por (at, event_id) y `at` tiene precision de
+    segundos: el prefijo temporal del id desempata eventos del mismo segundo
+    en orden de insercion (misma maquina; entre maquinas queda el clock skew,
+    riesgo aceptado y documentado en la decision 006).
+    """
+    now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    return f"{now}{uuid.uuid4().hex[:12]}"
 
 
 def fields_to_json(fields) -> str:

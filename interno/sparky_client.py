@@ -66,6 +66,11 @@ class SparkyClient:
         self._ensure()
         return self._lz.obtener_dataframe(f"DESCRIBE {tabla}")
 
+    def query_df(self, query):
+        """Ejecuta un SELECT y devuelve el DataFrame (lo usa SparkyRunner)."""
+        self._ensure()
+        return self._lz.obtener_dataframe(query)
+
     def run(self, query):
         """Ejecuta una sola query."""
         self._ensure()

@@ -18,15 +18,16 @@ Para el estado **actual** del sistema — como funciona hoy, no por que — ve a
 | [003](docs/decisiones/003-enmascaramiento-lo-decide-el-interno.md) | El aliado pide **columnas**; el interno decide la **mascara** de cada una y puede excluirlas. | `#enmascaramiento` `#seguridad` `#ui-aliado` `#ui-interno` | 2026-08-05 |
 | [004](docs/decisiones/004-drop-purge-antes-de-crear.md) | Cada ejecucion arranca con `DROP TABLE IF EXISTS <destino> PURGE`: la corrida **reemplaza**, ya no acumula. | `#sql` | 2026-08-05 |
 | [005](docs/decisiones/005-historico-re-ejecutable.md) | Todo script ejecutado queda en `script_history` y se puede **re-ejecutar** desde la app interna. | `#historico` `#seguridad` `#bd` `#ui-interno` | 2026-08-05 |
+| [006](docs/decisiones/006-coordinacion-impala-append-only.md) | La coordinacion se muda del SQLite/OneDrive a tablas `guispk_*` **append-only en Impala** (`proceso_enmascarado`); supersede parcialmente 001. | `#bd` `#arquitectura` `#seguridad` | 2026-08-05 |
 
 ## Tags
 
-- `#arquitectura` — separacion de capas y de apps: 001
-- `#bd` — esquema y uso del SQLite compartido: 001, 005
+- `#arquitectura` — separacion de capas y de apps: 001, 006
+- `#bd` — esquema y uso de la BD de coordinacion: 001, 005, 006
 - `#estados` — ciclo de vida de una solicitud: 002
 - `#enmascaramiento` — quien decide que se enmascara: 003
 - `#historico` — registro y re-ejecucion de scripts: 005
-- `#seguridad` — salts, secretos y limites de confianza: 001, 003, 005
+- `#seguridad` — salts, secretos y limites de confianza: 001, 003, 005, 006
 - `#sql` — forma del SQL generado: 004
 - `#ui-aliado` — pantallas del aliado: 003
 - `#ui-interno` — pantallas del equipo interno: 002, 003, 005

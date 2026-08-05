@@ -1,12 +1,13 @@
-"""Historico de scripts ejecutados por el equipo interno.
+"""Historico de scripts ejecutados por el equipo interno, sobre Impala.
 
 Guarda el script con los placeholders {{TEXT_SALT}} / {{INT_SALT}} intactos:
-la BD es compartida y los salts reales nunca se escriben ahi. Al re-ejecutar,
-la app interna vuelve a sustituirlos con los salts locales.
+las tablas de coordinacion las leen los aliados y los salts reales nunca se
+escriben ahi. Al re-ejecutar, la app interna vuelve a sustituirlos con los
+salts locales. La tabla ya era insert-only en SQLite: el port es directo.
 """
 
 from core import models
-from core.store.db import open_db
+from core.store import ddl
 
 ORIGIN_SOLICITUD = "solicitud"
 ORIGIN_ADHOC = "adhoc"
@@ -17,8 +18,9 @@ STATUS_ERROR = "error"
 
 
 class HistoryRepo:
-    def __init__(self, db_path: str):
-        self._path = db_path
+    def __init__(self, runner, schema: str = ddl.DEFAULT_SCHEMA):
+        self._runner = runner
+        self._table = ddl.qname("script_history", schema)
 
     def record(
         self,
@@ -32,31 +34,32 @@ class HistoryRepo:
         partition_where=None,
         salt_label=None,
         error=None,
-    ) -> int:
-        with open_db(self._path) as con:
-            cur = con.execute(
-                "INSERT INTO script_history (at, who, origin, request_code, "
-                "src_table, dest_table, partition_where, salt_label, script, "
-                "status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    models.utcnow_iso(),
-                    who,
-                    origin,
-                    request_code,
-                    src_table,
-                    dest_table,
-                    partition_where,
-                    salt_label,
-                    script,
-                    status,
-                    error,
-                ),
-            )
-            return cur.lastrowid
+    ) -> str:
+        script_id = models.new_id()
+        self._runner.execute(
+            f"INSERT INTO {self._table} (script_id, at, who, origin, "
+            "request_code, src_table, dest_table, partition_where, salt_label, "
+            "script, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                script_id,
+                models.utcnow_iso(),
+                who,
+                origin,
+                request_code,
+                src_table,
+                dest_table,
+                partition_where,
+                salt_label,
+                script,
+                status,
+                error,
+            ),
+        )
+        return script_id
 
     def list_scripts(self, search=None, limit: int = 200):
         """Ultimas ejecuciones, opcionalmente filtradas por tabla o solicitud."""
-        query = "SELECT * FROM script_history"
+        query = f"SELECT * FROM {self._table}"
         params = []
         if search and search.strip():
             like = f"%{search.strip()}%"
@@ -65,14 +68,20 @@ class HistoryRepo:
                 "OR request_code LIKE ? OR who LIKE ?"
             )
             params = [like, like, like, like]
-        query += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-        with open_db(self._path) as con:
-            return [dict(r) for r in con.execute(query, params)]
+        # limit inlined: es un int propio, y el ODBC de Impala no soporta
+        # parametros en LIMIT.
+        query += f" ORDER BY at DESC, script_id DESC LIMIT {int(limit)}"
+        rows = self._runner.query(query, tuple(params))
+        for row in rows:
+            row["id"] = row["script_id"]
+        return rows
 
-    def get(self, script_id: int):
-        with open_db(self._path) as con:
-            row = con.execute(
-                "SELECT * FROM script_history WHERE id = ?", (script_id,)
-            ).fetchone()
-            return dict(row) if row else None
+    def get(self, script_id: str):
+        rows = self._runner.query(
+            f"SELECT * FROM {self._table} WHERE script_id = ?", (script_id,)
+        )
+        if not rows:
+            return None
+        row = dict(rows[0])
+        row["id"] = row["script_id"]
+        return row
