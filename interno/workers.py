@@ -3,6 +3,7 @@
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core import masking, review, sql_builder, states
+from core.store import history_repo
 from interno.sparky_client import extract_columns
 
 
@@ -148,13 +149,36 @@ class ExecuteRequestWorker(QThread):
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, client, requests_repo, request, salts, executed_by):
+    def __init__(
+        self, client, requests_repo, request, salts, executed_by, history_repo=None
+    ):
         super().__init__()
         self._client = client
         self._repo = requests_repo
         self._request = request
         self._salts = salts
         self._executed_by = executed_by
+        self._history = history_repo
+
+    def _with_salts(self, sql):
+        return masking.apply_salts(
+            sql, self._salts["text_salt"], self._salts["int_salt"]
+        )
+
+    def _record(self, item, script, where):
+        """Deja el script en el historico, con placeholders (nunca los salts)."""
+        if self._history is None:
+            return
+        self._history.record(
+            who=self._executed_by,
+            origin=history_repo.ORIGIN_SOLICITUD,
+            src_table=item["src_table"],
+            dest_table=item["dest_table"],
+            script=script,
+            request_code=self._request["code"],
+            partition_where=where,
+            salt_label=self._salts["label"],
+        )
 
     def run(self):
         req = self._request
@@ -202,20 +226,16 @@ class ExecuteRequestWorker(QThread):
                 else:
                     fresh_where = None
 
-                create, insert, _ = sql_builder.build_request_script(
+                drop, create, insert, script = sql_builder.build_request_script(
                     final, src, dest, fresh_where
                 )
-                create = masking.apply_salts(
-                    create, self._salts["text_salt"], self._salts["int_salt"]
-                )
-                insert = masking.apply_salts(
-                    insert, self._salts["text_salt"], self._salts["int_salt"]
-                )
-
+                self.progress.emit(f"[{i}/{len(req['items'])}] DROP {dest}...")
+                self._client.run(drop)
                 self.progress.emit(f"[{i}/{len(req['items'])}] CREATE {dest}...")
-                self._client.run(create)
+                self._client.run(self._with_salts(create))
                 self.progress.emit(f"[{i}/{len(req['items'])}] INSERT {dest}...")
-                self._client.run(insert)
+                self._client.run(self._with_salts(insert))
+                self._record(item, script, fresh_where)
 
                 executed_wheres.append(f"{src}: {fresh_where or 'sin particion'}")
                 log.append(
@@ -240,3 +260,63 @@ class ExecuteRequestWorker(QThread):
             self.finished.emit("\n".join(log))
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
+
+
+class RerunScriptWorker(QThread):
+    """Re-ejecuta tal cual un script del historico con los salts locales.
+
+    No re-resuelve la particion ni regenera nada: corre exactamente el script
+    guardado. El DROP inicial hace que la tabla destino quede con el resultado
+    de esta corrida.
+    """
+
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, client, history, entry, salts, who):
+        super().__init__()
+        self._client = client
+        self._history = history
+        self._entry = entry
+        self._salts = salts
+        self._who = who
+
+    def run(self):
+        entry = self._entry
+        statements = sql_builder.split_statements(entry["script"])
+        try:
+            for i, stmt in enumerate(statements, start=1):
+                self.progress.emit(
+                    f"[{i}/{len(statements)}] {stmt.split()[0]} {entry['dest_table']}..."
+                )
+                self._client.run(
+                    masking.apply_salts(
+                        stmt, self._salts["text_salt"], self._salts["int_salt"]
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._record(entry, history_repo.STATUS_ERROR, str(exc))
+            self.error.emit(str(exc))
+            return
+        self._record(entry, history_repo.STATUS_OK, None)
+        self.finished.emit(
+            f"Re-ejecutado {entry['dest_table']} "
+            f"({len(statements)} sentencias, salt {self._salts['label']})."
+        )
+
+    def _record(self, entry, status, error):
+        if self._history is None:
+            return
+        self._history.record(
+            who=self._who,
+            origin=history_repo.ORIGIN_REEJECUCION,
+            src_table=entry["src_table"],
+            dest_table=entry["dest_table"],
+            script=entry["script"],
+            request_code=entry["request_code"],
+            partition_where=entry["partition_where"],
+            salt_label=self._salts["label"],
+            status=status,
+            error=error,
+        )

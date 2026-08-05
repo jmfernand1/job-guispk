@@ -41,7 +41,7 @@ def test_final_fields_drive_sql():
         {"col": "nombre", "type": "string", "masking": masking.MASK_TEXT},
         {"col": "edad", "type": "int", "masking": masking.NONE},
     ]
-    create, insert, _ = sql_builder.build_request_script(decision, SRC, DEST, WHERE)
+    _, create, insert, _ = sql_builder.build_request_script(decision, SRC, DEST, WHERE)
     assert "mask_text(nombre" in insert
     assert "mask_int" not in insert  # el interno dejo edad sin enmascarar
     assert "saldo" not in create  # columna excluida por el interno
@@ -49,14 +49,14 @@ def test_final_fields_drive_sql():
 
 def test_regenerated_script_matches_preview():
     """Formato viejo: el aliado guardaba el script con placeholders."""
-    _, _, preview = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
+    *_, preview = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
     stored_fields = models.fields_from_json(models.fields_to_json(FIELDS))
-    _, _, regen = sql_builder.build_request_script(stored_fields, SRC, DEST, WHERE)
+    *_, regen = sql_builder.build_request_script(stored_fields, SRC, DEST, WHERE)
     assert regen == preview
 
 
 def test_placeholders_present_and_substituted():
-    create, insert, _ = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
+    _, create, insert, _ = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
     assert masking.TEXT_SALT_PLACEHOLDER in insert
     assert masking.INT_SALT_PLACEHOLDER in insert
     assert masking.TEXT_SALT_PLACEHOLDER not in create  # el CREATE no lleva salts
@@ -69,14 +69,14 @@ def test_placeholders_present_and_substituted():
 
 
 def test_tampered_fields_detected():
-    _, _, preview = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
+    *_, preview = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
     tampered = [dict(f) for f in FIELDS]
     tampered[0]["masking"] = masking.NONE  # quitaron el enmascaramiento
-    _, _, regen = sql_builder.build_request_script(tampered, SRC, DEST, WHERE)
+    *_, regen = sql_builder.build_request_script(tampered, SRC, DEST, WHERE)
     assert regen != preview
 
 
 def test_unpartitioned_table_has_no_where():
-    _, insert, _ = sql_builder.build_request_script(FIELDS, SRC, DEST, None)
+    _, _, insert, _ = sql_builder.build_request_script(FIELDS, SRC, DEST, None)
     assert "WHERE" not in insert
     assert insert.rstrip().endswith(f"FROM {SRC};")

@@ -3,6 +3,7 @@
 Usa el SparkyClient compartido de la ventana principal (tab Conexion).
 """
 
+import getpass
 import random
 
 from PyQt6.QtWidgets import (
@@ -19,19 +20,26 @@ from PyQt6.QtWidgets import (
 )
 
 from core import sql_builder
+from core.store import history_repo
 from core.ui.column_table import ColumnTable
 from interno.sparky_client import extract_columns
 from interno.workers import DescribeWorker, ExecuteWorker
 
 
 class AdHocPanel(QWidget):
-    def __init__(self, client, status_cb, parent=None):
+    def __init__(self, client, status_cb, parent=None, history_repo=None, who_cb=None):
         super().__init__(parent)
         self.client = client
         self._set_status = status_cb
+        self._history = history_repo
+        # callable: el nombre se lee al ejecutar, no al construir el panel
+        self._who_cb = who_cb or getpass.getuser
+        self._drop_sql = None
         self._create_sql = None
         self._insert_sql = None
         self._full_script = None
+        self._history_script = None
+        self._where = None
         self._worker = None  # referencia viva al worker en curso
 
         root = QVBoxLayout(self)
@@ -185,7 +193,7 @@ class AdHocPanel(QWidget):
                 where_clause = self.client.get_partition(self.src_edit.text().strip())
             except Exception:  # noqa: BLE001 - tabla sin particiones
                 where_clause = None
-            create, insert, script = sql_builder.build_script(
+            drop, create, insert, script = sql_builder.build_script(
                 fields,
                 self.src_edit.text().strip(),
                 self.dest_edit.text().strip(),
@@ -196,9 +204,19 @@ class AdHocPanel(QWidget):
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))
             return
+        self._drop_sql = drop
         self._create_sql = create
         self._insert_sql = insert
         self._full_script = script
+        self._where = where_clause
+        # version con placeholders: es la unica que puede ir al historico, la
+        # BD es compartida y no debe contener los salts reales.
+        self._history_script = sql_builder.build_request_script(
+            fields,
+            self.src_edit.text().strip(),
+            self.dest_edit.text().strip(),
+            where_clause,
+        )[3]
         self.sql_view.setPlainText(script)
         self.save_btn.setEnabled(True)
         self.exec_btn.setEnabled(True)
@@ -223,17 +241,22 @@ class AdHocPanel(QWidget):
         if not self.client.connected:
             QMessageBox.warning(self, "Sin conexion", "Conecta a Sparky primero.")
             return
+        dest = self.dest_edit.text().strip()
         resp = QMessageBox.question(
             self,
             "Confirmar ejecucion",
-            f"Se ejecutaran CREATE e INSERT en:\n{self.dest_edit.text().strip()}\n\n"
+            f"Se ejecutaran DROP, CREATE e INSERT en:\n{dest}\n\n"
+            "Si la tabla destino ya existe se ELIMINA (DROP ... PURGE) y se "
+            "recrea con el resultado de esta corrida.\n\n"
             "Continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if resp != QMessageBox.StandardButton.Yes:
             return
         self.exec_btn.setEnabled(False)
-        self._worker = ExecuteWorker(self.client, [self._create_sql, self._insert_sql])
+        self._worker = ExecuteWorker(
+            self.client, [self._drop_sql, self._create_sql, self._insert_sql]
+        )
         self._worker.progress.connect(self._set_status)
         self._worker.finished.connect(self._on_executed)
         self._worker.error.connect(self._on_execute_error)
@@ -241,6 +264,7 @@ class AdHocPanel(QWidget):
 
     def _on_executed(self, _results):
         self.exec_btn.setEnabled(True)
+        self._record_history(history_repo.STATUS_OK, None)
         self._set_status("Ejecucion completada en Impala.")
         QMessageBox.information(
             self, "Listo", "Tabla enmascarada creada e insertada correctamente."
@@ -248,5 +272,21 @@ class AdHocPanel(QWidget):
 
     def _on_execute_error(self, msg):
         self.exec_btn.setEnabled(True)
+        self._record_history(history_repo.STATUS_ERROR, msg)
         self._set_status(f"Error al ejecutar: {msg}")
         QMessageBox.critical(self, "Error al ejecutar", msg)
+
+    def _record_history(self, status, error):
+        if self._history is None or not self._history_script:
+            return
+        self._history.record(
+            who=self._who_cb(),
+            origin=history_repo.ORIGIN_ADHOC,
+            src_table=self.src_edit.text().strip(),
+            dest_table=self.dest_edit.text().strip(),
+            script=self._history_script,
+            partition_where=self._where,
+            salt_label="ad-hoc (salts escritos a mano)",
+            status=status,
+            error=error,
+        )

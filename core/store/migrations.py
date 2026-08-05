@@ -74,7 +74,28 @@ ALTER TABLE request_items ADD COLUMN fields_final_json TEXT;
 UPDATE request_items SET fields_final_json = fields_json;
 """
 
-MIGRATIONS = [_V1, _V2]
+# Historico de scripts ejecutados por el equipo interno, para consultarlos y
+# re-ejecutarlos. El script se guarda con placeholders de salt: la BD es
+# compartida y nunca debe contener los salts reales.
+_V3 = """
+CREATE TABLE script_history (
+  id INTEGER PRIMARY KEY,
+  at TEXT NOT NULL,
+  who TEXT NOT NULL,
+  origin TEXT NOT NULL CHECK (origin IN ('solicitud','adhoc','re-ejecucion')),
+  request_code TEXT,
+  src_table TEXT NOT NULL,
+  dest_table TEXT NOT NULL,
+  partition_where TEXT,
+  salt_label TEXT,
+  script TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok','error')),
+  error TEXT
+);
+CREATE INDEX idx_history_at ON script_history(at);
+"""
+
+MIGRATIONS = [_V1, _V2, _V3]
 
 
 def migrate(con):

@@ -6,6 +6,7 @@ Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Ad-hoc.
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -25,13 +26,19 @@ from PyQt6.QtWidgets import (
 
 from core import review, states
 from core.store.catalog_repo import CatalogRepo
+from core.store.history_repo import HistoryRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
 from core.ui.column_table import ColumnTable
 from interno import salts as salts_mod
 from interno.sparky_client import SparkyClient, credentials_from_env
 from interno.ui.adhoc_panel import AdHocPanel
-from interno.workers import CatalogRefreshWorker, ConnectWorker, ExecuteRequestWorker
+from interno.workers import (
+    CatalogRefreshWorker,
+    ConnectWorker,
+    ExecuteRequestWorker,
+    RerunScriptWorker,
+)
 
 _STATE_FILTER_ALL = "todas"
 
@@ -45,9 +52,12 @@ class MainWindow(QMainWindow):
         self.client = SparkyClient(sparky_factory=sparky_factory)
         self.catalog_repo = CatalogRepo(db_path)
         self.requests_repo = RequestsRepo(db_path)
+        self.history_repo = HistoryRepo(db_path)
         self._worker = None
         self._current_request = None
         self._item_tables = []
+        self._history = []
+        self._current_script = None
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -55,7 +65,16 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_inventory_tab(), "Inventario")
         tabs.addTab(self._build_catalog_tab(), "Catalogo")
         tabs.addTab(self._build_requests_tab(), "Solicitudes")
-        tabs.addTab(AdHocPanel(self.client, self._set_status), "Ad-hoc")
+        tabs.addTab(self._build_history_tab(), "Historico")
+        tabs.addTab(
+            AdHocPanel(
+                self.client,
+                self._set_status,
+                history_repo=self.history_repo,
+                who_cb=self._who,
+            ),
+            "Ad-hoc",
+        )
 
         self.status_label = QLabel("Listo.")
         self.statusBar().addWidget(self.status_label)
@@ -63,6 +82,7 @@ class MainWindow(QMainWindow):
         self._reload_inventory()
         self._reload_catalog()
         self._reload_requests()
+        self._reload_history()
 
     def _set_status(self, msg):
         self.status_label.setText(msg)
@@ -412,6 +432,164 @@ class MainWindow(QMainWindow):
             return
         self._do_transition(states.RECHAZADA, comment.strip())
 
+    # ======================================================================
+    # Tab 5: Historico de scripts ejecutados
+    # ======================================================================
+    def _build_history_tab(self):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+
+        top = QHBoxLayout()
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("Filtrar por tabla, solicitud o usuario")
+        self.history_search.returnPressed.connect(self._reload_history)
+        buscar_btn = QPushButton("Buscar")
+        buscar_btn.clicked.connect(self._reload_history)
+        top.addWidget(QLabel("Buscar:"))
+        top.addWidget(self.history_search)
+        top.addWidget(buscar_btn)
+        lay.addLayout(top)
+
+        split = QSplitter()
+        self.history_table = QTableWidget(0, 6)
+        self.history_table.setHorizontalHeaderLabels(
+            ["Fecha", "Quien", "Origen", "Destino", "Salt", "Estado"]
+        )
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.history_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.history_table.itemSelectionChanged.connect(self._on_history_selected)
+        split.addWidget(self.history_table)
+
+        self.history_detail = QPlainTextEdit()
+        self.history_detail.setReadOnly(True)
+        self.history_detail.setPlaceholderText("Selecciona una ejecucion...")
+        split.addWidget(self.history_detail)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 2)
+        lay.addWidget(split)
+
+        btn_row = QHBoxLayout()
+        self.rerun_btn = QPushButton("Re-ejecutar script")
+        self.rerun_btn.clicked.connect(self.on_rerun_script)
+        self.rerun_btn.setEnabled(False)
+        self.export_script_btn = QPushButton("Guardar .sql")
+        self.export_script_btn.clicked.connect(self.on_export_script)
+        self.export_script_btn.setEnabled(False)
+        btn_row.addWidget(self.rerun_btn)
+        btn_row.addWidget(self.export_script_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+        return page
+
+    def _reload_history(self):
+        self._history = self.history_repo.list_scripts(
+            search=self.history_search.text()
+        )
+        self.history_table.setRowCount(0)
+        for h in self._history:
+            row = self.history_table.rowCount()
+            self.history_table.insertRow(row)
+            origen = h["origin"] + (
+                f" {h['request_code']}" if h["request_code"] else ""
+            )
+            for col, val in enumerate(
+                [
+                    h["at"],
+                    h["who"],
+                    origen,
+                    h["dest_table"],
+                    h["salt_label"] or "-",
+                    h["status"],
+                ]
+            ):
+                self.history_table.setItem(row, col, QTableWidgetItem(val))
+        self._current_script = None
+        self.history_detail.clear()
+        self.rerun_btn.setEnabled(False)
+        self.export_script_btn.setEnabled(False)
+
+    def _on_history_selected(self):
+        row = self.history_table.currentRow()
+        if row < 0 or row >= len(self._history):
+            return
+        self._current_script = self._history[row]
+        self.history_detail.setPlainText(
+            _render_history_entry(self._current_script)
+        )
+        self.rerun_btn.setEnabled(True)
+        self.export_script_btn.setEnabled(True)
+
+    def on_export_script(self):
+        entry = self._current_script
+        if not entry:
+            return
+        nombre = entry["dest_table"].replace(".", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Guardar script", f"{nombre}.sql", "SQL (*.sql)"
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(entry["script"])
+        self._set_status(f"Script guardado en {path}")
+
+    def on_rerun_script(self):
+        entry = self._current_script
+        if not entry:
+            return
+        if not self.client.connected:
+            QMessageBox.warning(self, "Sin conexion", "Conecta a Sparky primero.")
+            return
+        try:
+            salts = salts_mod.load_salts()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Salts no disponibles", str(exc))
+            return
+        aviso = ""
+        if entry["salt_label"] and entry["salt_label"] != salts["label"]:
+            aviso = (
+                f"\nATENCION: se ejecuto con el salt '{entry['salt_label']}' y "
+                f"ahora tienes '{salts['label']}'. Los datos enmascarados NO "
+                "coincidiran con los de la corrida original.\n"
+            )
+        resp = QMessageBox.question(
+            self,
+            "Re-ejecutar script",
+            f"Se re-ejecuta tal cual el script de {entry['at']}:\n"
+            f"  {entry['src_table']} -> {entry['dest_table']}\n"
+            f"  WHERE {entry['partition_where'] or 'sin particion'}\n\n"
+            f"La tabla destino se ELIMINA (DROP ... PURGE) y se recrea.\n"
+            "La particion NO se re-resuelve: corre el WHERE guardado.\n"
+            f"{aviso}\nContinuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        self.rerun_btn.setEnabled(False)
+        self._worker = RerunScriptWorker(
+            self.client, self.history_repo, entry, salts, self._who()
+        )
+        self._worker.progress.connect(self._set_status)
+        self._worker.finished.connect(self._on_rerun_done)
+        self._worker.error.connect(self._on_rerun_error)
+        self._worker.start()
+
+    def _on_rerun_done(self, msg):
+        self.rerun_btn.setEnabled(True)
+        self._set_status(msg)
+        QMessageBox.information(self, "Re-ejecutado", msg)
+        self._reload_history()
+
+    def _on_rerun_error(self, msg):
+        self.rerun_btn.setEnabled(True)
+        self._set_status(f"Error al re-ejecutar: {msg}")
+        QMessageBox.critical(self, "Error al re-ejecutar", msg)
+        self._reload_history()
+
     def _collect_decisions(self, req):
         """Lee la decision de cada ColumnTable y la valida contra lo solicitado."""
         if len(self._item_tables) != len(req["items"]):
@@ -452,6 +630,8 @@ class MainWindow(QMainWindow):
             f"{_render_decisions(req, decisions)}\n"
             f"Salt: {salts['label']}\n"
             "La particion se re-resolvera contra Impala antes de insertar.\n"
+            "Si la tabla destino ya existe se ELIMINA (DROP ... PURGE) y se "
+            "recrea con el resultado de esta corrida.\n"
             "Al ejecutar, la solicitud queda ejecutada a tu nombre.\n\n"
             "Continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -472,7 +652,12 @@ class MainWindow(QMainWindow):
         req = self.requests_repo.get_request(req["id"])
         self.execute_btn.setEnabled(False)
         self._worker = ExecuteRequestWorker(
-            self.client, self.requests_repo, req, salts, self._who()
+            self.client,
+            self.requests_repo,
+            req,
+            salts,
+            self._who(),
+            history_repo=self.history_repo,
         )
         self._worker.progress.connect(self._set_status)
         self._worker.finished.connect(self._on_request_executed)
@@ -488,6 +673,23 @@ class MainWindow(QMainWindow):
         self._set_status(f"Error al ejecutar solicitud: {msg}")
         QMessageBox.critical(self, "Error al ejecutar", msg)
         self._reload_requests()
+
+
+def _render_history_entry(entry) -> str:
+    """Ficha de una ejecucion del historico, con su script."""
+    lines = [
+        f"Ejecutado : {entry['at']} por {entry['who']}",
+        f"Origen    : {entry['origin']}"
+        + (f" ({entry['request_code']})" if entry["request_code"] else ""),
+        f"Tablas    : {entry['src_table']} -> {entry['dest_table']}",
+        f"WHERE     : {entry['partition_where'] or 'sin particion'}",
+        f"Salt      : {entry['salt_label'] or '-'}",
+        f"Resultado : {entry['status']}",
+    ]
+    if entry["error"]:
+        lines.append(f"Error     : {entry['error']}")
+    lines += ["", "=== Script (los salts se sustituyen al ejecutar) ===", entry["script"]]
+    return "\n".join(lines)
 
 
 def _render_decisions(req, decisions) -> str:

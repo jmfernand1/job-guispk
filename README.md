@@ -21,7 +21,12 @@ Inventario + DESCRIBE  ──►  catalogo (esquemas)  ──►  navegar catalo
                                                        elegir columnas
 Definir enmascaramiento ◄── solicitud (enviada)  ◄──  enviar solicitud
 Ejecutar o Rechazar    ──►  ejecutada + log      ──►  ver estado y mascaras
+Historico (re-ejecutar) ◄─  scripts ejecutados
 ```
+
+Cada ejecucion hace `DROP TABLE IF EXISTS <destino> PURGE` antes del CREATE:
+la tabla destino queda siempre con el resultado de la ultima corrida, y
+re-ejecutar un script del historico no falla porque el destino ya exista.
 
 El **enmascaramiento es un punto de control del equipo interno**: el aliado pide
 columnas, y el interno decide la mascara de cada una y puede excluir las que no
@@ -58,6 +63,9 @@ Funciones de enmascaramiento (UDFs en la Landing Zone):
   que va a crear haya sido solicitada por el aliado y conserve su tipo.
 - La particion se **re-resuelve** contra Impala al momento de ejecutar y el
   WHERE realmente usado queda registrado en la solicitud.
+- El historico guarda los scripts **con placeholders**, nunca con los salts
+  reales: la BD es compartida. Al re-ejecutar se sustituyen con los salts
+  locales de la maquina interna.
 - El ejecutable del aliado se construye **sin** `sparky_bc` (ver
   `guispk_aliado.spec`): no puede conectarse a Impala.
 
@@ -110,7 +118,11 @@ python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
    *Ejecutar solicitud* (guarda la decision auditada, verifica, re-resuelve
    particion, aplica salts, corre CREATE + INSERT y marca ejecutada con log) o
    *Rechazar* (con motivo).
-5. **Ad-hoc** — el flujo original completo para trabajo directo del interno.
+5. **Historico** — todos los scripts ejecutados (solicitudes, ad-hoc y
+   re-ejecuciones), con buscador por tabla/solicitud/usuario. Permite ver el
+   script, guardarlo como `.sql` y **re-ejecutarlo** tal cual (avisa si el salt
+   actual no es el de la corrida original).
+6. **Ad-hoc** — el flujo original completo para trabajo directo del interno.
 
 ### App aliado (pestanas)
 
@@ -144,12 +156,12 @@ anti-alteracion (regeneracion vs vista previa).
 ```
 core/                    nucleo compartido (sin Sparky)
   masking.py             reglas tipo→funcion + placeholders de salt
-  sql_builder.py         CREATE + INSERT (+ vista previa de la solicitud)
+  sql_builder.py         DROP + CREATE + INSERT (+ vista previa de la solicitud)
   review.py              reglas de la decision del interno sobre lo solicitado
   states.py              maquina de estados de solicitudes
   config.py              resolucion de la ruta de la BD compartida
   models.py              serializacion JSON de campos/esquemas
-  store/                 SQLite: db, migraciones, catalog_repo, requests_repo
+  store/                 SQLite: db, migraciones, catalog/requests/history repos
   ui/                    widgets compartidos: column_table, catalog_browser
 interno/                 app interna: sparky_client, salts, workers, ui/
 aliado/                  app aliado: ui/ (nunca importa interno/)

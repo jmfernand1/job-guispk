@@ -32,13 +32,35 @@ def test_build_insert_has_casts_and_aliases():
 
 
 def test_build_script_concatenates():
-    create, insert, script = sql_builder.build_script(
+    drop, create, insert, script = sql_builder.build_script(
         FIELDS, "origen.t", "proceso_enmascarado.t_enm", "saltTexto", 12345
     )
+    assert drop in script
     assert create in script
     assert insert in script
-    assert "-- 1) CREATE" in script
-    assert "-- 2) INSERT" in script
+    assert "-- 1) DROP" in script
+    assert "-- 2) CREATE" in script
+    assert "-- 3) INSERT" in script
+
+
+def test_build_drop_purga_el_destino():
+    """El DROP evita que falle si la tabla destino ya existe."""
+    drop = sql_builder.build_drop("proceso_enmascarado.t_enm")
+    assert drop == "DROP TABLE IF EXISTS proceso_enmascarado.t_enm PURGE;"
+
+
+def test_split_statements_ignora_comentarios():
+    """Re-ejecutar desde el historico: el script se parte en sentencias."""
+    *_, script = sql_builder.build_script(
+        FIELDS, "origen.t", "proceso_enmascarado.t_enm", "saltTexto", 12345
+    )
+    stmts = sql_builder.split_statements(script)
+    assert len(stmts) == 3
+    assert stmts[0].startswith("DROP TABLE IF EXISTS")
+    assert stmts[1].startswith("CREATE TABLE")
+    assert stmts[2].startswith("INSERT INTO")
+    assert not any("--" in s for s in stmts)
+    assert all(s.endswith(";") for s in stmts)
 
 
 def test_build_request_preview_sin_enmascaramiento():

@@ -15,6 +15,14 @@ def _validate(fields, src_table, dest_table):
         raise ValueError("Falta la tabla destino.")
 
 
+def build_drop(dest_table) -> str:
+    """DROP previo al CREATE: permite recrear el destino sin fallar si ya existe.
+
+    PURGE salta la papelera de HDFS: la tabla anterior se borra de inmediato.
+    """
+    return f"DROP TABLE IF EXISTS {dest_table} PURGE;"
+
+
 def build_create(fields, dest_table) -> str:
     """Genera el CREATE TABLE IF NOT EXISTS ... STORED AS PARQUET."""
     lines = []
@@ -50,9 +58,11 @@ def build_insert(fields, src_table, dest_table, text_salt, int_salt, filters=Non
 
 
 def build_script(fields, src_table, dest_table, text_salt, int_salt, filters=None):
-    """Devuelve (create, insert, script_completo).
+    """Devuelve (drop, create, insert, script_completo).
 
-    El script completo concatena ambos con un comentario de cabecera.
+    El script completo concatena las tres sentencias con una cabecera. El DROP
+    va primero para poder recrear el destino: cada ejecucion deja la tabla
+    destino con exactamente el contenido de esta corrida.
     """
     _validate(fields, src_table, dest_table)
     if not text_salt and any(f["masking"] == masking.MASK_TEXT for f in fields):
@@ -62,18 +72,34 @@ def build_script(fields, src_table, dest_table, text_salt, int_salt, filters=Non
     ):
         raise ValueError("Falta el salt entero (hay columnas mask_int).")
 
+    drop = build_drop(dest_table)
     create = build_create(fields, dest_table)
     insert = build_insert(fields, src_table, dest_table, text_salt, int_salt, filters)
     script = (
         f"-- Script de enmascaramiento generado automaticamente\n"
         f"-- Origen : {src_table}\n"
         f"-- Destino: {dest_table}\n\n"
-        f"-- 1) CREATE\n"
+        f"-- 1) DROP (el destino se recrea desde cero)\n"
+        f"{drop}\n\n"
+        f"-- 2) CREATE\n"
         f"{create}\n\n"
-        f"-- 2) INSERT\n"
+        f"-- 3) INSERT\n"
         f"{insert}\n"
     )
-    return create, insert, script
+    return drop, create, insert, script
+
+
+def split_statements(script: str):
+    """Parte un script guardado en sentencias ejecutables, sin comentarios.
+
+    Se usa para re-ejecutar un script del historico. El corte se hace sobre el
+    texto con placeholders (antes de sustituir los salts), asi un salt con ';'
+    no puede partir una sentencia.
+    """
+    sin_comentarios = "\n".join(
+        line for line in script.splitlines() if not line.lstrip().startswith("--")
+    )
+    return [s.strip() + ";" for s in sin_comentarios.split(";") if s.strip()]
 
 
 def build_request_preview(fields, src_table, dest_table, filters=None) -> str:
