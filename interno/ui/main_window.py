@@ -295,13 +295,11 @@ class MainWindow(QMainWindow):
         lay.addWidget(split)
 
         btn_row = QHBoxLayout()
-        self.approve_btn = QPushButton("Aprobar")
-        self.approve_btn.clicked.connect(self.on_approve)
-        self.reject_btn = QPushButton("Rechazar")
-        self.reject_btn.clicked.connect(self.on_reject)
         self.execute_btn = QPushButton("Ejecutar solicitud")
         self.execute_btn.clicked.connect(self.on_execute_request)
-        for b in (self.approve_btn, self.reject_btn, self.execute_btn):
+        self.reject_btn = QPushButton("Rechazar")
+        self.reject_btn.clicked.connect(self.on_reject)
+        for b in (self.execute_btn, self.reject_btn):
             b.setEnabled(False)
             btn_row.addWidget(b)
         btn_row.addStretch()
@@ -337,9 +335,8 @@ class MainWindow(QMainWindow):
     def _update_request_buttons(self):
         req = self._current_request
         state = req["state"] if req else None
-        self.approve_btn.setEnabled(state == states.ENVIADA)
-        self.reject_btn.setEnabled(state == states.ENVIADA)
-        self.execute_btn.setEnabled(state == states.APROBADA)
+        self.execute_btn.setEnabled(state in states.EJECUTABLES)
+        self.reject_btn.setEnabled(state in states.EJECUTABLES)
 
     def _do_transition(self, to_state, comment=None):
         try:
@@ -353,16 +350,6 @@ class MainWindow(QMainWindow):
         except states.TransitionError as exc:
             QMessageBox.warning(self, "No se pudo", str(exc))
         self._reload_requests()
-
-    def on_approve(self):
-        if not self._current_request:
-            return
-        comment, ok = QInputDialog.getText(
-            self, "Aprobar", "Comentario (opcional):"
-        )
-        if not ok:
-            return
-        self._do_transition(states.APROBADA, comment.strip() or None)
 
     def on_reject(self):
         if not self._current_request:
@@ -379,7 +366,7 @@ class MainWindow(QMainWindow):
 
     def on_execute_request(self):
         req = self._current_request
-        if not req or req["state"] != states.APROBADA:
+        if not req or req["state"] not in states.EJECUTABLES:
             return
         if not self.client.connected:
             QMessageBox.warning(self, "Sin conexion", "Conecta a Sparky primero.")
@@ -397,7 +384,8 @@ class MainWindow(QMainWindow):
             "Confirmar ejecucion",
             f"Solicitud {req['code']} ({len(req['items'])} tabla(s)):\n{tables}\n\n"
             f"Salt: {salts['label']}\n"
-            "La particion se re-resolvera contra Impala antes de insertar.\n\n"
+            "La particion se re-resolvera contra Impala antes de insertar.\n"
+            "Al ejecutar, la solicitud queda aprobada y ejecutada.\n\n"
             "Continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )

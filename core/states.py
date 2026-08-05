@@ -1,17 +1,23 @@
 """Maquina de estados de una solicitud de enmascaramiento.
 
-borrador -> enviada -> aprobada -> ejecutada
+borrador -> enviada -> ejecutada   (el interno ejecuta directo, sin aprobar)
                     -> rechazada -> borrador (corregir y reenviar)
 enviada -> borrador (el aliado la retira)
+
+'aprobada' es un estado heredado: ya no se puede entrar en el, pero las
+solicitudes viejas que quedaron ahi todavia se pueden ejecutar o rechazar.
 """
 
 BORRADOR = "borrador"
 ENVIADA = "enviada"
-APROBADA = "aprobada"
+APROBADA = "aprobada"  # heredado, no se genera mas
 RECHAZADA = "rechazada"
 EJECUTADA = "ejecutada"
 
-ALL_STATES = (BORRADOR, ENVIADA, APROBADA, RECHAZADA, EJECUTADA)
+ALL_STATES = (BORRADOR, ENVIADA, RECHAZADA, EJECUTADA)
+
+# Estados desde los que el interno puede ejecutar una solicitud.
+EJECUTABLES = (ENVIADA, APROBADA)
 
 ROLE_ALIADO = "aliado"
 ROLE_INTERNO = "interno"
@@ -20,10 +26,12 @@ ROLE_INTERNO = "interno"
 TRANSITIONS = {
     (BORRADOR, ENVIADA): ROLE_ALIADO,
     (ENVIADA, BORRADOR): ROLE_ALIADO,
-    (ENVIADA, APROBADA): ROLE_INTERNO,
+    (ENVIADA, EJECUTADA): ROLE_INTERNO,
     (ENVIADA, RECHAZADA): ROLE_INTERNO,
     (RECHAZADA, BORRADOR): ROLE_ALIADO,
+    # heredadas: solicitudes que quedaron en 'aprobada' antes del cambio.
     (APROBADA, EJECUTADA): ROLE_INTERNO,
+    (APROBADA, RECHAZADA): ROLE_INTERNO,
 }
 
 

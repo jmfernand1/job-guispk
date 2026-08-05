@@ -130,7 +130,7 @@ class CatalogRefreshWorker(QThread):
 
 
 class ExecuteRequestWorker(QThread):
-    """Ejecuta una solicitud aprobada: verifica, re-resuelve particion y corre.
+    """Ejecuta una solicitud enviada: verifica, re-resuelve particion y corre.
 
     Por cada item:
     1. Regenera el SQL desde fields_json y lo compara con el sql_preview

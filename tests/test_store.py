@@ -76,9 +76,7 @@ def test_request_lifecycle(db_path):
     assert req["code"].startswith("REQ-")
 
     repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
-    repo.transition(
-        req["id"], states.APROBADA, "interno1", states.ROLE_INTERNO, comment="ok"
-    )
+    # el interno ejecuta directo desde 'enviada', sin paso de aprobacion
     repo.transition(
         req["id"], states.EJECUTADA, "interno1", states.ROLE_INTERNO,
         execution_log="todo bien", executed_partition_where="ingestion_day = x",
@@ -87,12 +85,14 @@ def test_request_lifecycle(db_path):
     final = repo.get_request(req["id"])
     assert final["state"] == states.EJECUTADA
     assert final["reviewed_by"] == "interno1"
+    assert final["reviewed_at"]
+    assert final["executed_by"] == "interno1"
     assert final["execution_log"] == "todo bien"
     assert final["items"][0]["fields"] == FIELDS
     assert len(final["items"]) == 1
 
     actions = [a["action"] for a in repo.audit_trail(req["id"])]
-    assert actions == ["crear", "transicion", "transicion", "transicion"]
+    assert actions == ["crear", "transicion", "transicion"]
 
 
 def test_invalid_transition_rejected(db_path):
@@ -126,9 +126,9 @@ def test_concurrent_transition_fails_clean(db_path):
     repo_a.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
     # el "otro proceso" retira la solicitud primero
     repo_b.transition(req["id"], states.BORRADOR, "aliado1", states.ROLE_ALIADO)
-    # este proceso cree que sigue enviada e intenta aprobar
+    # este proceso cree que sigue enviada e intenta ejecutar
     with pytest.raises(states.TransitionError):
-        repo_a.transition(req["id"], states.APROBADA, "interno1", states.ROLE_INTERNO)
+        repo_a.transition(req["id"], states.EJECUTADA, "interno1", states.ROLE_INTERNO)
 
 
 def test_request_codes_are_sequential(db_path):

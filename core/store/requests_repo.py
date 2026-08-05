@@ -138,7 +138,7 @@ class RequestsRepo:
             if to_state == states.ENVIADA:
                 sets.append("sent_at = ?")
                 params.append(now)
-            elif to_state in (states.APROBADA, states.RECHAZADA):
+            elif to_state == states.RECHAZADA:
                 sets += ["reviewed_by = ?", "reviewed_at = ?", "review_comment = ?"]
                 params += [who, now, comment]
             elif to_state == states.EJECUTADA:
@@ -149,6 +149,10 @@ class RequestsRepo:
                     "executed_partition_where = ?",
                 ]
                 params += [who, now, execution_log, executed_partition_where]
+                if from_state == states.ENVIADA:
+                    # Sin paso de aprobacion: quien ejecuta es quien revisa.
+                    sets += ["reviewed_by = ?", "reviewed_at = ?", "review_comment = ?"]
+                    params += [who, now, comment]
 
             params += [request_id, from_state]
             cur = con.execute(

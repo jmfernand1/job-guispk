@@ -19,12 +19,12 @@ solicitudes y la auditoria.
 INTERNO                       BD COMPARTIDA                  ALIADO
 Inventario + DESCRIBE  ──►  catalogo (esquemas)  ──►  navegar catalogo
                                                        elegir mascaras
-Revisar / Aprobar      ◄──  solicitud (enviada)  ◄──  generar + enviar
-Ejecutar en Impala     ──►  ejecutada + log      ──►  ver estado
+Revisar                ◄──  solicitud (enviada)  ◄──  generar + enviar
+Ejecutar o Rechazar    ──►  ejecutada + log      ──►  ver estado
 ```
 
 Ciclo de vida de una solicitud:
-`borrador → enviada → aprobada → ejecutada`, con `enviada → borrador` (retirar)
+`borrador → enviada → ejecutada`, con `enviada → borrador` (retirar)
 y `enviada → rechazada → borrador` (corregir y reenviar). Cada movimiento queda
 en `audit_log` (quien, cuando, que).
 
@@ -97,9 +97,9 @@ python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
 2. **Inventario** — alta/baja de tablas autorizadas para los aliados.
 3. **Catalogo** — *Actualizar catalogo* corre DESCRIBE + SHOW PARTITIONS +
    ultima ingestion de cada tabla activa y publica los esquemas.
-4. **Solicitudes** — revisar detalle y SQL, *Aprobar* / *Rechazar* (con motivo),
+4. **Solicitudes** — revisar detalle y SQL y decidir en un solo paso:
    *Ejecutar solicitud* (verifica, re-resuelve particion, aplica salts, corre
-   CREATE + INSERT y marca ejecutada con log).
+   CREATE + INSERT y marca ejecutada con log) o *Rechazar* (con motivo).
 5. **Ad-hoc** — el flujo original completo para trabajo directo del interno.
 
 ### App aliado (pestanas)
