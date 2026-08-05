@@ -3,6 +3,7 @@
 Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Ad-hoc.
 """
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -22,10 +23,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import states
+from core import review, states
 from core.store.catalog_repo import CatalogRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
+from core.ui.column_table import ColumnTable
 from interno import salts as salts_mod
 from interno.sparky_client import SparkyClient, credentials_from_env
 from interno.ui.adhoc_panel import AdHocPanel
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
         self.requests_repo = RequestsRepo(db_path)
         self._worker = None
         self._current_request = None
+        self._item_tables = []
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -286,12 +289,30 @@ class MainWindow(QMainWindow):
         self.req_table.itemSelectionChanged.connect(self._on_request_selected)
         split.addWidget(self.req_table)
 
+        right = QSplitter(Qt.Orientation.Vertical)
         self.req_detail = QPlainTextEdit()
         self.req_detail.setReadOnly(True)
         self.req_detail.setPlaceholderText("Selecciona una solicitud...")
-        split.addWidget(self.req_detail)
+        right.addWidget(self.req_detail)
+
+        decision_box = QGroupBox(
+            "Enmascaramiento (decision del equipo interno)"
+        )
+        decision_lay = QVBoxLayout(decision_box)
+        decision_lay.addWidget(
+            QLabel(
+                "Elige la mascara de cada columna. Desmarca las que no deban "
+                "salir al destino."
+            )
+        )
+        self.item_tabs = QTabWidget()
+        decision_lay.addWidget(self.item_tabs)
+        right.addWidget(decision_box)
+        right.setStretchFactor(0, 1)
+        right.setStretchFactor(1, 2)
+        split.addWidget(right)
         split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
+        split.setStretchFactor(1, 3)
         lay.addWidget(split)
 
         btn_row = QHBoxLayout()
@@ -320,7 +341,14 @@ class MainWindow(QMainWindow):
                 self.req_table.setItem(row, col, QTableWidgetItem(val))
         self._current_request = None
         self.req_detail.clear()
+        # setRowCount(0) dispara itemSelectionChanged con currentRow() == -1, que
+        # sale temprano: hay que limpiar las tablas de columnas explicitamente.
+        self._clear_item_tables()
         self._update_request_buttons()
+
+    def _clear_item_tables(self):
+        self.item_tabs.clear()
+        self._item_tables = []
 
     def _on_request_selected(self):
         row = self.req_table.currentRow()
@@ -330,7 +358,27 @@ class MainWindow(QMainWindow):
             self._requests[row]["id"]
         )
         self.req_detail.setPlainText(_render_request(self._current_request))
+        self._load_item_tables(self._current_request)
         self._update_request_buttons()
+
+    def _load_item_tables(self, req):
+        """Una ColumnTable por item, precargada con la decision guardada o lo pedido."""
+        self._clear_item_tables()
+        editable = req["state"] == states.ENVIADA
+        try:
+            salts = salts_mod.load_salts()
+        except Exception:  # noqa: BLE001 - sin salts la vista previa va generica
+            salts = None
+        for item in req["items"]:
+            table = ColumnTable()
+            table.load_fields(item["fields_final"] or item["fields"])
+            if salts:
+                table.update_salts(salts["text_salt"], salts["int_salt"])
+            table.setEnabled(editable)
+            self._item_tables.append(table)
+            self.item_tabs.addTab(
+                table, f"{item['src_table']} -> {item['dest_table']}"
+            )
 
     def _update_request_buttons(self):
         req = self._current_request
@@ -364,6 +412,22 @@ class MainWindow(QMainWindow):
             return
         self._do_transition(states.RECHAZADA, comment.strip())
 
+    def _collect_decisions(self, req):
+        """Lee la decision de cada ColumnTable y la valida contra lo solicitado."""
+        if len(self._item_tables) != len(req["items"]):
+            raise ValueError(
+                "La solicitud cambio en pantalla. Refresca e intenta de nuevo."
+            )
+        decisions = []
+        for item, table in zip(req["items"], self._item_tables):
+            fields = table.selected_fields()
+            try:
+                review.validate_final_fields(item["fields"], fields)
+            except ValueError as exc:
+                raise ValueError(f"{item['src_table']}: {exc}") from exc
+            decisions.append(fields)
+        return decisions
+
     def on_execute_request(self):
         req = self._current_request
         if not req or req["state"] != states.ENVIADA:
@@ -376,13 +440,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Salts no disponibles", str(exc))
             return
-        tables = "\n".join(
-            f"  {i['src_table']} -> {i['dest_table']}" for i in req["items"]
-        )
+        try:
+            decisions = self._collect_decisions(req)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Revisa el enmascaramiento", str(exc))
+            return
         resp = QMessageBox.question(
             self,
             "Confirmar ejecucion",
-            f"Solicitud {req['code']} ({len(req['items'])} tabla(s)):\n{tables}\n\n"
+            f"Solicitud {req['code']} ({len(req['items'])} tabla(s)):\n"
+            f"{_render_decisions(req, decisions)}\n"
             f"Salt: {salts['label']}\n"
             "La particion se re-resolvera contra Impala antes de insertar.\n"
             "Al ejecutar, la solicitud queda ejecutada a tu nombre.\n\n"
@@ -391,6 +458,18 @@ class MainWindow(QMainWindow):
         )
         if resp != QMessageBox.StandardButton.Yes:
             return
+        # Se persiste la decision antes de ejecutar: queda auditada aunque la
+        # ejecucion falle, y al recargar el interno recupera su seleccion.
+        try:
+            for item, fields in zip(req["items"], decisions):
+                self.requests_repo.set_item_final_fields(
+                    item["id"], fields, self._who()
+                )
+        except states.TransitionError as exc:
+            QMessageBox.warning(self, "No se pudo", str(exc))
+            self._reload_requests()
+            return
+        req = self.requests_repo.get_request(req["id"])
         self.execute_btn.setEnabled(False)
         self._worker = ExecuteRequestWorker(
             self.client, self.requests_repo, req, salts, self._who()
@@ -409,6 +488,21 @@ class MainWindow(QMainWindow):
         self._set_status(f"Error al ejecutar solicitud: {msg}")
         QMessageBox.critical(self, "Error al ejecutar", msg)
         self._reload_requests()
+
+
+def _render_decisions(req, decisions) -> str:
+    """Resumen por tabla del enmascaramiento elegido, para el dialogo de confirmacion."""
+    bloques = []
+    for item, fields in zip(req["items"], decisions):
+        lineas = [f"{item['src_table']} -> {item['dest_table']}"]
+        lineas.append(review.masking_summary(fields))
+        excluidas = review.excluded_columns(item["fields"], fields)
+        if excluidas:
+            lineas.append(
+                f"  Excluidas ({len(excluidas)}): {', '.join(excluidas)}"
+            )
+        bloques.append("\n".join(lineas))
+    return "\n\n".join(bloques) + "\n"
 
 
 def _render_request(req) -> str:

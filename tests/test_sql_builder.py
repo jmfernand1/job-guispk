@@ -41,6 +41,26 @@ def test_build_script_concatenates():
     assert "-- 2) INSERT" in script
 
 
+def test_build_request_preview_sin_enmascaramiento():
+    """El aliado pide columnas: el preview no necesita la clave masking."""
+    pedidas = [{"col": "nombre", "type": "string"}, {"col": "edad", "type": "int"}]
+    preview = sql_builder.build_request_preview(
+        pedidas, "lz.t", "proceso_enmascarado.t_enm", "ingestion_day = 2026-08-01"
+    )
+    assert "lz.t" in preview
+    assert "proceso_enmascarado.t_enm" in preview
+    assert "ingestion_day = 2026-08-01" in preview
+    assert "  nombre string" in preview
+    assert "Columnas solicitadas (2)" in preview
+
+
+def test_build_request_preview_sin_particion():
+    preview = sql_builder.build_request_preview(
+        [{"col": "n", "type": "string"}], "lz.t", "d.t", None
+    )
+    assert "WHERE  : sin particion" in preview
+
+
 def test_no_fields_raises():
     with pytest.raises(ValueError):
         sql_builder.build_script([], "o.t", "d.t", "s", 1)

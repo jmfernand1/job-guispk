@@ -76,11 +76,33 @@ def build_script(fields, src_table, dest_table, text_salt, int_salt, filters=Non
     return create, insert, script
 
 
-def build_request_script(fields, src_table, dest_table, filters=None):
-    """Script con salts placeholder: es el que genera el aliado en su solicitud.
+def build_request_preview(fields, src_table, dest_table, filters=None) -> str:
+    """Texto de la solicitud del aliado: origen, destino, WHERE y columnas.
 
-    El interno regenera este mismo script desde fields_json y lo compara contra
-    el sql_preview guardado para detectar cualquier alteracion antes de ejecutar.
+    El aliado ya no elige enmascaramiento, asi que no puede generar SQL; pide
+    columnas. Este texto es lo que se guarda en sql_preview y lo que el interno
+    regenera antes de ejecutar para detectar cualquier alteracion de la
+    solicitud (por eso incluye origen, destino y WHERE, no solo las columnas).
+    """
+    _validate(fields, src_table, dest_table)
+    cols = "\n".join(f"  {f['col']} {f['type']}" for f in fields)
+    where = filters.strip() if filters and filters.strip() else "sin particion"
+    return (
+        f"-- Solicitud de enmascaramiento\n"
+        f"-- Origen : {src_table}\n"
+        f"-- Destino: {dest_table}\n"
+        f"-- WHERE  : {where}\n"
+        f"-- El equipo interno define el enmascaramiento de cada columna.\n\n"
+        f"Columnas solicitadas ({len(fields)}):\n"
+        f"{cols}\n"
+    )
+
+
+def build_request_script(fields, src_table, dest_table, filters=None):
+    """Script con salts placeholder: es el SQL final que arma el interno.
+
+    Los salts reales se sustituyen con masking.apply_salts justo antes de
+    ejecutar, para que nunca queden escritos en la BD compartida.
     """
     return build_script(
         fields,

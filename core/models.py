@@ -10,7 +10,11 @@ def utcnow_iso() -> str:
 
 
 def fields_to_json(fields) -> str:
-    """[{col, type, masking}] -> JSON canonico (claves ordenadas, estable)."""
+    """[{col, type, masking?}] -> JSON canonico (claves ordenadas, estable).
+
+    Sin `masking` es lo que pide el aliado; con `masking`, la decision del
+    interno. El orden canonico importa: el interno regenera y compara.
+    """
     return json.dumps(fields, ensure_ascii=False, sort_keys=True)
 
 

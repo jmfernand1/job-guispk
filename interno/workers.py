@@ -2,7 +2,7 @@
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from core import masking, sql_builder, states
+from core import masking, review, sql_builder, states
 from interno.sparky_client import extract_columns
 
 
@@ -133,11 +133,14 @@ class ExecuteRequestWorker(QThread):
     """Ejecuta una solicitud enviada: verifica, re-resuelve particion y corre.
 
     Por cada item:
-    1. Regenera el SQL desde fields_json y lo compara con el sql_preview
-       guardado (si difieren, aborta: el contenido fue alterado).
-    2. Re-resuelve la ultima particion en Impala (si falla, usa el WHERE
+    1. Regenera lo que pidio el aliado desde fields_json y lo compara con el
+       sql_preview guardado (si difieren, aborta: la solicitud fue alterada).
+    2. Valida la decision del interno contra lo solicitado: solo puede
+       enmascarar y excluir columnas, nunca agregar una que no se pidio.
+    3. Re-resuelve la ultima particion en Impala (si falla, usa el WHERE
        snapshot de la solicitud).
-    3. Sustituye los salts placeholder por los reales y ejecuta CREATE + INSERT.
+    4. Construye el SQL final con las mascaras del interno, sustituye los salts
+       placeholder por los reales y ejecuta CREATE + INSERT.
     Al final marca la solicitud como ejecutada con el log completo.
     """
 
@@ -163,15 +166,29 @@ class ExecuteRequestWorker(QThread):
                 src, dest = item["src_table"], item["dest_table"]
                 self.progress.emit(f"[{i}/{len(req['items'])}] Verificando {src}...")
 
-                _, _, regen = sql_builder.build_request_script(
-                    item["fields"], src, dest, item["partition_where_requested"]
-                )
+                if review.is_legacy_item(item["fields"]):
+                    # formato viejo: el aliado guardaba el SQL con placeholders
+                    _, _, regen = sql_builder.build_request_script(
+                        item["fields"], src, dest, item["partition_where_requested"]
+                    )
+                else:
+                    regen = sql_builder.build_request_preview(
+                        item["fields"], src, dest, item["partition_where_requested"]
+                    )
                 if regen != item["sql_preview"]:
                     raise ValueError(
-                        f"El SQL guardado de {src} no coincide con la regeneracion "
+                        f"Lo guardado para {src} no coincide con la regeneracion "
                         "desde los campos: la solicitud fue alterada o generada "
                         "con otra version. No se ejecuta."
                     )
+
+                final = item["fields_final"]
+                if not final:
+                    raise ValueError(
+                        f"No hay decision de enmascaramiento para {src}. "
+                        "Revisa las columnas antes de ejecutar."
+                    )
+                review.validate_final_fields(item["fields"], final)
 
                 if item["partition_where_requested"]:
                     try:
@@ -186,7 +203,7 @@ class ExecuteRequestWorker(QThread):
                     fresh_where = None
 
                 create, insert, _ = sql_builder.build_request_script(
-                    item["fields"], src, dest, fresh_where
+                    final, src, dest, fresh_where
                 )
                 create = masking.apply_salts(
                     create, self._salts["text_salt"], self._salts["int_salt"]
@@ -205,6 +222,12 @@ class ExecuteRequestWorker(QThread):
                     f"{src} -> {dest}: OK "
                     f"(WHERE {fresh_where or 'sin particion'})"
                 )
+                log.append(review.masking_summary(final))
+                excluidas = review.excluded_columns(item["fields"], final)
+                if excluidas:
+                    log.append(
+                        f"  Columnas excluidas por el interno: {', '.join(excluidas)}"
+                    )
 
             self._repo.transition(
                 req["id"],

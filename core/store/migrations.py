@@ -65,7 +65,16 @@ CREATE TABLE audit_log (
 );
 """
 
-MIGRATIONS = [_V1]
+# El enmascaramiento pasa a ser decision del interno: fields_json guarda las
+# columnas que pidio el aliado y fields_final_json la decision del interno.
+# El backfill es correcto para solicitudes viejas: ahi la mascara que eligio el
+# aliado si fue la decision final.
+_V2 = """
+ALTER TABLE request_items ADD COLUMN fields_final_json TEXT;
+UPDATE request_items SET fields_final_json = fields_json;
+"""
+
+MIGRATIONS = [_V1, _V2]
 
 
 def migrate(con):

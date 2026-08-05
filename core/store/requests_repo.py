@@ -66,6 +66,34 @@ class RequestsRepo:
             )
             return cur.lastrowid
 
+    # -- revision del interno ------------------------------------------------
+    def set_item_final_fields(self, item_id: int, fields, who: str):
+        """Guarda el enmascaramiento que decidio el interno para un item.
+
+        Solo se puede sobre una solicitud enviada: si otro interno ya la
+        ejecuto o rechazo, falla limpio en vez de pisar el registro historico.
+        """
+        with open_db(self._path) as con:
+            row = con.execute(
+                "SELECT request_id FROM request_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise states.TransitionError(f"El item {item_id} no existe.")
+            cur = con.execute(
+                "UPDATE request_items SET fields_final_json = ? WHERE id = ? AND "
+                "request_id IN (SELECT id FROM requests WHERE state = ?)",
+                (models.fields_to_json(fields), item_id, states.ENVIADA),
+            )
+            if cur.rowcount == 0:
+                raise states.TransitionError(
+                    "La solicitud ya no esta enviada: otro usuario la ejecuto o "
+                    "la rechazo. Refresca e intenta de nuevo."
+                )
+            cols = ", ".join(f"{f['col']}:{f['masking']}" for f in fields)
+            self._audit(
+                con, row["request_id"], who, "decision_enmascaramiento", cols
+            )
+
     # -- consulta ------------------------------------------------------------
     def list_requests(self, state=None, requester=None):
         query = "SELECT * FROM requests"
@@ -98,6 +126,11 @@ class RequestsRepo:
             ):
                 d = dict(item)
                 d["fields"] = models.fields_from_json(d["fields_json"])
+                d["fields_final"] = (
+                    models.fields_from_json(d["fields_final_json"])
+                    if d["fields_final_json"]
+                    else None
+                )
                 req["items"].append(d)
             return req
 

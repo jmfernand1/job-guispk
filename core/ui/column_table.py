@@ -22,9 +22,14 @@ _MASK_ORDER = [masking.MASK_TEXT, masking.MASK_INT, masking.NONE]
 
 
 class ColumnTable(QTableWidget):
-    """Una fila por columna: [Usar] | nombre | tipo | [combo] | preview."""
+    """Una fila por columna: [Usar] | nombre | tipo | [combo] | preview.
 
-    def __init__(self, parent=None):
+    Con `with_masking=False` (modo aliado) se ocultan las columnas de
+    enmascaramiento y vista previa: el aliado solo elige que columnas necesita
+    y el enmascaramiento lo decide el interno.
+    """
+
+    def __init__(self, parent=None, with_masking=True):
         super().__init__(0, 5, parent)
         self.setHorizontalHeaderLabels(
             ["Usar", "Columna", "Tipo origen", "Enmascaramiento", "Vista previa"]
@@ -34,6 +39,10 @@ class ColumnTable(QTableWidget):
         self.setColumnWidth(COL_NAME, 180)
         self.setColumnWidth(COL_TYPE, 120)
         self.setColumnWidth(COL_MASK, 160)
+        self._with_masking = with_masking
+        if not with_masking:
+            self.setColumnHidden(COL_MASK, True)
+            self.setColumnHidden(COL_PREVIEW, True)
         # salts actuales para la vista previa
         self._text_salt = "saltTexto"
         self._int_salt = "12345"
@@ -45,7 +54,17 @@ class ColumnTable(QTableWidget):
         for name, ctype in columns:
             self._add_row(name, ctype)
 
-    def _add_row(self, name, ctype):
+    def load_fields(self, fields):
+        """fields: [{col, type, masking?}]. Restaura una seleccion guardada.
+
+        Si el campo trae `masking` se preselecciona en el combo; si no, queda
+        la sugerencia automatica por tipo.
+        """
+        self.setRowCount(0)
+        for f in fields:
+            self._add_row(f["col"], f["type"], f.get("masking"))
+
+    def _add_row(self, name, ctype, mask=None):
         row = self.rowCount()
         self.insertRow(row)
 
@@ -71,8 +90,9 @@ class ColumnTable(QTableWidget):
         combo = QComboBox()
         for key in _MASK_ORDER:
             combo.addItem(masking.LABELS[key], key)
-        suggested = masking.suggest_masking(ctype)
-        combo.setCurrentIndex(_MASK_ORDER.index(suggested))
+        if mask not in _MASK_ORDER:
+            mask = masking.suggest_masking(ctype)
+        combo.setCurrentIndex(_MASK_ORDER.index(mask))
         combo.currentIndexChanged.connect(self._refresh_row_factory(row))
         self.setCellWidget(row, COL_MASK, combo)
 
@@ -99,28 +119,35 @@ class ColumnTable(QTableWidget):
         for row in range(self.rowCount()):
             self._refresh_row(row)
 
-    def use_placeholder_salts(self):
-        """Modo aliado: la vista previa muestra los placeholders, no salts reales."""
-        self.update_salts(masking.TEXT_SALT_PLACEHOLDER, masking.INT_SALT_PLACEHOLDER)
-
     # -- seleccion ----------------------------------------------------------
     def set_all_checked(self, checked: bool):
         for row in range(self.rowCount()):
             chk = self.cellWidget(row, COL_USE).findChild(QCheckBox)
             chk.setChecked(checked)
 
-    def selected_fields(self):
-        """Devuelve [{col, type, masking}] de las filas marcadas."""
-        fields = []
+    def _checked_rows(self):
         for row in range(self.rowCount()):
             chk = self.cellWidget(row, COL_USE).findChild(QCheckBox)
-            if not chk.isChecked():
-                continue
-            fields.append(
-                {
-                    "col": self.item(row, COL_NAME).text(),
-                    "type": self.item(row, COL_TYPE).text(),
-                    "masking": self.cellWidget(row, COL_MASK).currentData(),
-                }
-            )
-        return fields
+            if chk.isChecked():
+                yield row
+
+    def selected_fields(self):
+        """Devuelve [{col, type, masking}] de las filas marcadas."""
+        return [
+            {
+                "col": self.item(row, COL_NAME).text(),
+                "type": self.item(row, COL_TYPE).text(),
+                "masking": self.cellWidget(row, COL_MASK).currentData(),
+            }
+            for row in self._checked_rows()
+        ]
+
+    def selected_columns(self):
+        """Devuelve [{col, type}] de las filas marcadas, sin enmascaramiento."""
+        return [
+            {
+                "col": self.item(row, COL_NAME).text(),
+                "type": self.item(row, COL_TYPE).text(),
+            }
+            for row in self._checked_rows()
+        ]

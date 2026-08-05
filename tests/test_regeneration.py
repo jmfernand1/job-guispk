@@ -2,6 +2,11 @@
 
 from core import masking, models, sql_builder
 
+REQUESTED = [
+    {"col": "nombre", "type": "string"},
+    {"col": "edad", "type": "int"},
+    {"col": "saldo", "type": "decimal(12,2)"},
+]
 FIELDS = [
     {"col": "nombre", "type": "string", "masking": masking.MASK_TEXT},
     {"col": "edad", "type": "int", "masking": masking.MASK_INT},
@@ -12,8 +17,38 @@ DEST = "proceso_enmascarado.clientes_enm"
 WHERE = "ingestion_day = 2026-08-01"
 
 
+def test_request_preview_stable():
+    """Ciclo del aliado: genera -> guarda -> el interno regenera y compara."""
+    preview = sql_builder.build_request_preview(REQUESTED, SRC, DEST, WHERE)
+    stored = models.fields_from_json(models.fields_to_json(REQUESTED))
+    assert sql_builder.build_request_preview(stored, SRC, DEST, WHERE) == preview
+
+
+def test_preview_detects_tampering():
+    """Cambiar destino o columnas rompe la comparacion con lo guardado."""
+    preview = sql_builder.build_request_preview(REQUESTED, SRC, DEST, WHERE)
+    otro_destino = sql_builder.build_request_preview(
+        REQUESTED, SRC, "proceso_enmascarado.otra", WHERE
+    )
+    assert otro_destino != preview
+    columna_extra = REQUESTED + [{"col": "salario", "type": "double"}]
+    assert sql_builder.build_request_preview(columna_extra, SRC, DEST, WHERE) != preview
+
+
+def test_final_fields_drive_sql():
+    """El SQL ejecutado lleva la decision del interno, no lo que pidio el aliado."""
+    decision = [
+        {"col": "nombre", "type": "string", "masking": masking.MASK_TEXT},
+        {"col": "edad", "type": "int", "masking": masking.NONE},
+    ]
+    create, insert, _ = sql_builder.build_request_script(decision, SRC, DEST, WHERE)
+    assert "mask_text(nombre" in insert
+    assert "mask_int" not in insert  # el interno dejo edad sin enmascarar
+    assert "saldo" not in create  # columna excluida por el interno
+
+
 def test_regenerated_script_matches_preview():
-    """Simula el ciclo completo: aliado genera -> guarda -> interno regenera."""
+    """Formato viejo: el aliado guardaba el script con placeholders."""
     _, _, preview = sql_builder.build_request_script(FIELDS, SRC, DEST, WHERE)
     stored_fields = models.fields_from_json(models.fields_to_json(FIELDS))
     _, _, regen = sql_builder.build_request_script(stored_fields, SRC, DEST, WHERE)

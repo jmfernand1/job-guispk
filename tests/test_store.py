@@ -2,14 +2,21 @@
 
 import pytest
 
-from core import states
+from core import models, states
 from core.store.catalog_repo import CatalogRepo
 from core.store.db import ensure_db, open_db
+from core.store.migrations import MIGRATIONS
 from core.store.requests_repo import RequestsRepo
 
+# lo que pide el aliado: columnas sin enmascaramiento
 FIELDS = [
+    {"col": "nombre", "type": "string"},
+    {"col": "edad", "type": "int"},
+]
+# la decision del interno sobre esas columnas
+FIELDS_FINAL = [
     {"col": "nombre", "type": "string", "masking": "mask_text"},
-    {"col": "edad", "type": "int", "masking": "mask_int"},
+    {"col": "edad", "type": "int", "masking": "none"},
 ]
 
 
@@ -24,7 +31,27 @@ def test_migrations_idempotent(db_path):
     ensure_db(db_path)  # segunda llamada no debe fallar ni duplicar
     with open_db(db_path) as con:
         version = con.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 1
+    assert version == len(MIGRATIONS)
+
+
+def test_v2_backfills_fields_final(tmp_path):
+    """Una BD en V1 migra a V2 conservando la mascara vieja como decision final."""
+    path = str(tmp_path / "vieja.db")
+    with open_db(path) as con:
+        con.executescript(MIGRATIONS[0])
+        con.execute("PRAGMA user_version = 1")
+        con.execute(
+            "INSERT INTO requests (code, state, requester, created_at) "
+            "VALUES ('REQ-1', 'enviada', 'aliado1', '2026-01-01T00:00:00Z')"
+        )
+        con.execute(
+            "INSERT INTO request_items (request_id, src_table, dest_table, "
+            "fields_json, sql_preview) VALUES (1, 'lz.t', 'p.t_enm', ?, '-- sql')",
+            (models.fields_to_json(FIELDS_FINAL),),
+        )
+    ensure_db(path)
+    item = RequestsRepo(path).get_request(1)["items"][0]
+    assert item["fields_final"] == FIELDS_FINAL
 
 
 def test_inventory_and_capture_roundtrip(db_path):
@@ -93,6 +120,34 @@ def test_request_lifecycle(db_path):
 
     actions = [a["action"] for a in repo.audit_trail(req["id"])]
     assert actions == ["crear", "transicion", "transicion"]
+
+
+def test_item_starts_without_final_fields(db_path):
+    """Lo que crea el aliado no trae decision de enmascaramiento."""
+    repo, req = _new_request_with_item(db_path)
+    assert repo.get_request(req["id"])["items"][0]["fields_final"] is None
+
+
+def test_set_item_final_fields_persists_and_audits(db_path):
+    repo, req = _new_request_with_item(db_path)
+    repo.transition(req["id"], states.ENVIADA, "aliado1", states.ROLE_ALIADO)
+    item_id = repo.get_request(req["id"])["items"][0]["id"]
+
+    repo.set_item_final_fields(item_id, FIELDS_FINAL, "interno1")
+
+    item = repo.get_request(req["id"])["items"][0]
+    assert item["fields_final"] == FIELDS_FINAL
+    assert item["fields"] == FIELDS  # lo que pidio el aliado no se toca
+    actions = [a["action"] for a in repo.audit_trail(req["id"])]
+    assert "decision_enmascaramiento" in actions
+
+
+def test_set_item_final_fields_requires_enviada(db_path):
+    """En borrador (o ya ejecutada) no se puede pisar la decision."""
+    repo, req = _new_request_with_item(db_path)
+    item_id = repo.get_request(req["id"])["items"][0]["id"]
+    with pytest.raises(states.TransitionError):
+        repo.set_item_final_fields(item_id, FIELDS_FINAL, "interno1")
 
 
 def test_invalid_transition_rejected(db_path):

@@ -1,8 +1,9 @@
 """Ventana principal de la app ALIADO (PyQt6).
 
 Trabaja 100% offline contra la BD compartida: navega el catalogo capturado por
-el equipo interno, arma la seleccion de mascaras y crea solicitudes formales.
-No conoce credenciales de Impala; el SQL generado lleva salts placeholder.
+el equipo interno, elige las columnas que necesita y crea solicitudes formales.
+El enmascaramiento de cada columna lo decide el equipo interno al ejecutar; el
+aliado no lo elige ni ve los salts.
 """
 
 import getpass
@@ -25,7 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import models, sql_builder, states
+from core import models, review, sql_builder, states
 from core.store.catalog_repo import CatalogRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
@@ -86,8 +87,14 @@ class MainWindow(QMainWindow):
         cat_lay.addWidget(self.catalog_browser)
         lay.addWidget(cat_box)
 
-        col_box = QGroupBox("2. Campos y enmascaramiento")
+        col_box = QGroupBox("2. Columnas solicitadas")
         col_lay = QVBoxLayout(col_box)
+        col_lay.addWidget(
+            QLabel(
+                "Marca las columnas que necesitas. El enmascaramiento de cada "
+                "una lo define el equipo interno al revisar la solicitud."
+            )
+        )
         btn_row = QHBoxLayout()
         all_btn = QPushButton("Seleccionar todo")
         none_btn = QPushButton("Seleccionar ninguno")
@@ -97,7 +104,7 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(none_btn)
         btn_row.addStretch()
         col_lay.addLayout(btn_row)
-        self.table = ColumnTable()
+        self.table = ColumnTable(with_masking=False)
         col_lay.addWidget(self.table)
         lay.addWidget(col_box)
 
@@ -128,7 +135,8 @@ class MainWindow(QMainWindow):
         self.sql_view = QPlainTextEdit()
         self.sql_view.setReadOnly(True)
         self.sql_view.setPlaceholderText(
-            "Vista previa del SQL (los salts reales los aplica el equipo interno)..."
+            "Vista previa de la solicitud (el equipo interno define el "
+            "enmascaramiento al ejecutarla)..."
         )
         act_lay.addWidget(self.sql_view)
         lay.addWidget(act_box)
@@ -144,7 +152,6 @@ class MainWindow(QMainWindow):
     def _on_entry_selected(self, entry):
         self._current_entry = entry
         self.table.load_columns(models.columns_from_json(entry["columns_json"]))
-        self.table.use_placeholder_salts()
         tabla = entry["table_name"].split(".")[-1]
         self.dest_edit.setText(f"proceso_enmascarado.{tabla}_enm")
         self._invalidate_preview()
@@ -164,16 +171,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Sin tabla", "Selecciona una tabla del catalogo.")
             return
         try:
-            fields = self.table.selected_fields()
+            fields = self.table.selected_columns()
             src = entry["table_name"]
             dest = self.dest_edit.text().strip()
             where = entry["last_partition_where"]
-            _, _, script = sql_builder.build_request_script(fields, src, dest, where)
+            preview = sql_builder.build_request_preview(fields, src, dest, where)
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))
             return
-        self._preview = (fields, src, dest, where, script)
-        self.sql_view.setPlainText(script)
+        self._preview = (fields, src, dest, where, preview)
+        self.sql_view.setPlainText(preview)
         self.draft_btn.setEnabled(True)
         self.send_btn.setEnabled(True)
         self._set_status("Vista previa generada.")
@@ -181,7 +188,7 @@ class MainWindow(QMainWindow):
     def on_create_request(self, send: bool):
         if not self._preview:
             return
-        fields, src, dest, where, script = self._preview
+        fields, src, dest, where, preview = self._preview
         requester = self._requester()
         try:
             req = self.requests_repo.create_request(requester)
@@ -192,7 +199,7 @@ class MainWindow(QMainWindow):
                 self._current_entry["capture_id"],
                 fields,
                 where,
-                script,
+                preview,
             )
             if send:
                 self.requests_repo.transition(
@@ -286,20 +293,7 @@ class MainWindow(QMainWindow):
         self._current_request = self.requests_repo.get_request(
             self._requests[row]["id"]
         )
-        req = self._current_request
-        lines = [
-            f"Solicitud : {req['code']}   Estado: {req['state']}",
-            f"Creada    : {req['created_at']}",
-        ]
-        if req["review_comment"]:
-            lines.append(
-                f"Revision  : {req['reviewed_by']} - {req['review_comment']}"
-            )
-        if req["executed_at"]:
-            lines.append(f"Ejecutada : {req['executed_at']}")
-        for item in req["items"]:
-            lines += ["", item["sql_preview"]]
-        self.req_detail.setPlainText("\n".join(lines))
+        self.req_detail.setPlainText(_render_request(self._current_request))
         self._update_buttons()
 
     def _update_buttons(self):
@@ -329,10 +323,38 @@ class MainWindow(QMainWindow):
         if not req:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Exportar script SQL", f"{req['code']}.sql", "SQL (*.sql)"
+            self, "Exportar detalle", f"{req['code']}.txt", "Texto (*.txt)"
         )
         if not path:
             return
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n\n".join(item["sql_preview"] for item in req["items"]))
+            fh.write(_render_request(req))
         self._set_status(f"Exportado en {path}")
+
+
+def _render_request(req) -> str:
+    """Detalle de la solicitud para el aliado: lo pedido y lo que decidio el interno."""
+    lines = [
+        f"Solicitud : {req['code']}   Estado: {req['state']}",
+        f"Creada    : {req['created_at']}",
+    ]
+    if req["review_comment"]:
+        lines.append(f"Revision  : {req['reviewed_by']} - {req['review_comment']}")
+    if req["executed_at"]:
+        lines.append(f"Ejecutada : {req['executed_at']} por {req['executed_by']}")
+    for item in req["items"]:
+        lines += ["", item["sql_preview"]]
+        final = item["fields_final"]
+        if final and req["executed_at"]:
+            lines += [
+                "",
+                "Enmascaramiento aplicado por el equipo interno:",
+                review.masking_summary(final),
+            ]
+            excluidas = review.excluded_columns(item["fields"], final)
+            if excluidas:
+                lines.append(
+                    "Columnas excluidas por el equipo interno: "
+                    + ", ".join(excluidas)
+                )
+    return "\n".join(lines)

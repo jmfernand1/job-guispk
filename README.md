@@ -3,11 +3,11 @@
 Motor estandarizado de enmascaramiento para un equipo mixto:
 
 - **Equipo interno (2 personas, acceso total a Impala):** mantiene el inventario
-  de tablas autorizadas, publica el catalogo (DESCRIBE), revisa y **ejecuta** las
-  solicitudes.
+  de tablas autorizadas, publica el catalogo (DESCRIBE), **decide el
+  enmascaramiento de cada columna** y **ejecuta** las solicitudes.
 - **Aliados (4 personas, sin acceso a zonas internas):** navegan el catalogo
-  offline, arman las mascaras por columna y crean **solicitudes formales**.
-  Solo leen la base resultado `proceso_enmascarado`.
+  offline, **eligen las columnas** que necesitan y crean **solicitudes
+  formales**. Solo leen la base resultado `proceso_enmascarado`.
 
 Ambos equipos comparten un archivo **SQLite** en una carpeta compartida
 (OneDrive / unidad de red) con el inventario, los esquemas capturados, las
@@ -18,10 +18,15 @@ solicitudes y la auditoria.
 ```
 INTERNO                       BD COMPARTIDA                  ALIADO
 Inventario + DESCRIBE  ──►  catalogo (esquemas)  ──►  navegar catalogo
-                                                       elegir mascaras
-Revisar                ◄──  solicitud (enviada)  ◄──  generar + enviar
-Ejecutar o Rechazar    ──►  ejecutada + log      ──►  ver estado
+                                                       elegir columnas
+Definir enmascaramiento ◄── solicitud (enviada)  ◄──  enviar solicitud
+Ejecutar o Rechazar    ──►  ejecutada + log      ──►  ver estado y mascaras
 ```
+
+El **enmascaramiento es un punto de control del equipo interno**: el aliado pide
+columnas, y el interno decide la mascara de cada una y puede excluir las que no
+deban salir. Nunca puede agregar una columna que el aliado no pidio: se valida
+contra `fields_json` antes de ejecutar.
 
 Ciclo de vida de una solicitud:
 `borrador → enviada → ejecutada`, con `enviada → borrador` (retirar)
@@ -37,7 +42,9 @@ Funciones de enmascaramiento (UDFs en la Landing Zone):
 
 - **La BD compartida no contiene secretos**: los aliados pueden leer el archivo.
   Ni credenciales ni salts se guardan ahi.
-- El aliado genera SQL con **placeholders** `{{TEXT_SALT}}` / `{{INT_SALT}}`.
+- El aliado no genera SQL ni elige mascaras: su solicitud es una lista de
+  columnas. El SQL lo arma el interno con **placeholders** `{{TEXT_SALT}}` /
+  `{{INT_SALT}}` que se sustituyen justo antes de ejecutar.
   Los salts reales viven solo en las maquinas internas, en `~/.guispk/salts.json`:
 
   ```json
@@ -45,9 +52,10 @@ Funciones de enmascaramiento (UDFs en la Landing Zone):
   ```
 
   El mismo par de salts por proyecto preserva la integridad referencial.
-- Antes de ejecutar, la app interna **regenera** el SQL desde los campos
-  guardados y lo compara con la vista previa de la solicitud: si difieren
-  (alteracion o version distinta), no ejecuta.
+- Antes de ejecutar, la app interna **regenera** la solicitud desde los campos
+  guardados y la compara con la vista previa almacenada: si difieren
+  (alteracion o version distinta), no ejecuta. Ademas valida que toda columna
+  que va a crear haya sido solicitada por el aliado y conserve su tipo.
 - La particion se **re-resuelve** contra Impala al momento de ejecutar y el
   WHERE realmente usado queda registrado en la solicitud.
 - El ejecutable del aliado se construye **sin** `sparky_bc` (ver
@@ -97,17 +105,20 @@ python main_aliado.py           # app aliado (solo BD compartida, sin Sparky)
 2. **Inventario** — alta/baja de tablas autorizadas para los aliados.
 3. **Catalogo** — *Actualizar catalogo* corre DESCRIBE + SHOW PARTITIONS +
    ultima ingestion de cada tabla activa y publica los esquemas.
-4. **Solicitudes** — revisar detalle y SQL y decidir en un solo paso:
-   *Ejecutar solicitud* (verifica, re-resuelve particion, aplica salts, corre
-   CREATE + INSERT y marca ejecutada con log) o *Rechazar* (con motivo).
+4. **Solicitudes** — revisar el detalle, **elegir la mascara de cada columna**
+   (y desmarcar las que no deban salir) y decidir en un solo paso:
+   *Ejecutar solicitud* (guarda la decision auditada, verifica, re-resuelve
+   particion, aplica salts, corre CREATE + INSERT y marca ejecutada con log) o
+   *Rechazar* (con motivo).
 5. **Ad-hoc** — el flujo original completo para trabajo directo del interno.
 
 ### App aliado (pestanas)
 
-1. **Nueva solicitud** — elegir tabla del catalogo, marcar columnas y mascara,
-   generar vista previa (salts placeholder) y *Guardar borrador* o *Enviar*.
-2. **Mis solicitudes** — estados, comentarios de rechazo, *Enviar*, *Retirar*,
-   *Reabrir rechazada*, *Exportar .sql*.
+1. **Nueva solicitud** — elegir tabla del catalogo, marcar las columnas que
+   necesita, generar la vista previa y *Guardar borrador* o *Enviar*. El
+   enmascaramiento no se elige aqui.
+2. **Mis solicitudes** — estados, comentarios de rechazo, el enmascaramiento que
+   aplico el interno, *Enviar*, *Retirar*, *Reabrir rechazada*, *Exportar .txt*.
 
 ## Empaquetado (PyInstaller)
 
@@ -133,7 +144,8 @@ anti-alteracion (regeneracion vs vista previa).
 ```
 core/                    nucleo compartido (sin Sparky)
   masking.py             reglas tipo→funcion + placeholders de salt
-  sql_builder.py         CREATE + INSERT (+ variante con placeholders)
+  sql_builder.py         CREATE + INSERT (+ vista previa de la solicitud)
+  review.py              reglas de la decision del interno sobre lo solicitado
   states.py              maquina de estados de solicitudes
   config.py              resolucion de la ruta de la BD compartida
   models.py              serializacion JSON de campos/esquemas
