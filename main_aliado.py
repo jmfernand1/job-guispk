@@ -1,9 +1,9 @@
 """Punto de entrada de la app ALIADO.
 
-No usa Sparky: se conecta a Impala con el DSN ODBC del aliado (dialogo de
-conexion al arrancar) y trabaja contra las tablas de coordinacion guispk_*
-del esquema proceso_enmascarado (SELECT + INSERT; el esquema lo mantiene la
-app interna).
+Se conecta a Impala por Sparky si el aliado lo tiene disponible y cae al DSN
+ODBC si Sparky falla (dialogo de conexion al arrancar). Trabaja contra las
+tablas de coordinacion guispk_* del esquema proceso_enmascarado (SELECT +
+INSERT; el esquema lo mantiene la app interna).
 
     python main_aliado.py            # pide credenciales de Impala
     python main_aliado.py --fake     # smoke sin cluster (store en memoria)
@@ -25,10 +25,12 @@ def main():
     app = QApplication(sys.argv)
 
     username = ""
+    backend = ""
     if "--fake" in sys.argv:
         from tests.fake_impala import new_runner_with_schema
 
         runner = new_runner_with_schema()
+        backend = "fake"
     else:
         from aliado.ui.connect_dialog import ConnectDialog
         from PyQt6.QtWidgets import QDialog
@@ -38,8 +40,11 @@ def main():
             sys.exit(0)
         runner = dialog.runner
         username = dialog.username()
+        backend = dialog.backend
 
-    window = MainWindow(runner, schema=settings["schema"], username=username)
+    window = MainWindow(
+        runner, schema=settings["schema"], username=username, backend=backend
+    )
     window.show()
     sys.exit(app.exec())
 

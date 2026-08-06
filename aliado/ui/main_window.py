@@ -40,7 +40,13 @@ from core.ui.repo_worker import AsyncRepoMixin
 
 
 class MainWindow(QMainWindow, AsyncRepoMixin):
-    def __init__(self, runner, schema: str = ddl.DEFAULT_SCHEMA, username: str = ""):
+    def __init__(
+        self,
+        runner,
+        schema: str = ddl.DEFAULT_SCHEMA,
+        username: str = "",
+        backend: str = "",
+    ):
         super().__init__()
         self.setWindowTitle("Enmascarador de datos - ALIADO")
         self.resize(1100, 820)
@@ -60,7 +66,8 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         if username:
             self.requester_edit.setText(username)
 
-        self.status_label = QLabel("Listo.")
+        # El backend a la vista: si Sparky fallo y quedo en ODBC, se ve aqui.
+        self.status_label = QLabel(f"Listo. Conexion: {backend}" if backend else "Listo.")
         self.statusBar().addWidget(self.status_label)
 
         self._reload_catalog()

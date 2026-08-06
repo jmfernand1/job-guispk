@@ -47,7 +47,7 @@ def test_record_and_get(repo):
     assert entry["script"] == SCRIPT
     assert entry["status"] == STATUS_OK
     assert entry["request_code"] == "REQ-1"
-    assert entry["at"]
+    assert entry["event_at"]
 
 
 def test_script_guardado_no_lleva_salts_reales(repo):

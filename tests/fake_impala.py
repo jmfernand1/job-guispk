@@ -3,8 +3,14 @@
 Viable porque los repos generan SQL ANSI (INSERT VALUES, SELECT, window
 functions) con placeholders `?`, que sqlite3 soporta nativo. El nombre
 calificado `proceso_enmascarado.guispk_*` se resuelve con ATTACH de una BD en
-memoria bajo ese alias. Del DDL de Impala solo hay que quitar
-`STORED AS PARQUET`.
+memoria bajo ese alias. Del DDL de Impala hay que quitar `STORED AS PARQUET`
+y traducir `STRING` a `TEXT`.
+
+Lo de STRING->TEXT no es cosmetico: SQLite le da afinidad **NUMERIC** a un tipo
+que no reconoce, asi que guarda como float un id que resulte ser todo digitos
+(pasa ~1 de cada 350 ids: `new_id` = timestamp + 12 hex al azar). Despues el
+`sorted` del fold compara float con str y revienta. Con TEXT la afinidad es la
+correcta y los ids se guardan como los manda el repo.
 """
 
 import re
@@ -24,7 +30,12 @@ class FakeImpalaRunner:
 
     @staticmethod
     def _normalize(sql: str) -> str:
-        return re.sub(r"STORED\s+AS\s+PARQUET", "", sql, flags=re.IGNORECASE)
+        sql = re.sub(r"STORED\s+AS\s+PARQUET", "", sql, flags=re.IGNORECASE)
+        if re.match(r"\s*CREATE\s+TABLE", sql, flags=re.IGNORECASE):
+            # Solo en el DDL: en un INSERT, "STRING" puede ser parte de un
+            # script guardado y no hay que tocarlo.
+            sql = re.sub(r"\bSTRING\b", "TEXT", sql, flags=re.IGNORECASE)
+        return sql
 
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
         with self._lock:

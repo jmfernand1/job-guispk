@@ -1,8 +1,11 @@
-"""Dialogo modal de conexion del aliado a Impala (ODBC/DSN).
+"""Dialogo modal de conexion del aliado a Impala (Sparky, o ODBC de respaldo).
 
 Aparece al arrancar: sin conexion no hay catalogo ni solicitudes. Las
 credenciales nunca se guardan; se precargan de las env vars (USERNAME /
 PSWD / DSNLZ) y el DSN puede venir del config.ini.
+
+El backend usado se expone en `backend` y se muestra en la barra de estado:
+que el aliado sepa si quedo en Sparky o si cayo a ODBC.
 """
 
 from PyQt6.QtWidgets import (
@@ -14,7 +17,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
-from aliado.impala_client import ImpalaOdbcRunner, credentials_from_env
+from aliado.impala_client import connect_impala, credentials_from_env
 from core.ui.repo_worker import RepoWorker
 
 
@@ -24,14 +27,17 @@ class ConnectDialog(QDialog):
         self.setWindowTitle("Conexion a Impala - ALIADO")
         self.setModal(True)
         self.runner = None
+        self.backend = None
+        self.fallback_error = None
         self._worker = None
         creds = credentials_from_env()
 
         lay = QVBoxLayout(self)
         lay.addWidget(
             QLabel(
-                "Conecta con tu usuario de Impala (DSN corporativo).\n"
-                "Solo se usa para leer el catalogo y registrar solicitudes."
+                "Conecta con tu usuario de Impala (Sparky si esta disponible,\n"
+                "si no el DSN corporativo). Solo se usa para leer el catalogo\n"
+                "y registrar solicitudes."
             )
         )
         form = QFormLayout()
@@ -67,16 +73,14 @@ class ConnectDialog(QDialog):
             return
         user, pwd = self.username(), self.pwd_edit.text()
         self._ok_btn.setEnabled(False)
-        self.status_label.setText("Conectando...")
-        self._worker = RepoWorker(
-            lambda: ImpalaOdbcRunner.connect(dsn, user, pwd)
-        )
+        self.status_label.setText("Conectando (Sparky, si no ODBC)...")
+        self._worker = RepoWorker(lambda: connect_impala(dsn, user, pwd))
         self._worker.finished.connect(self._on_connected)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
-    def _on_connected(self, runner):
-        self.runner = runner
+    def _on_connected(self, result):
+        self.runner, self.backend, self.fallback_error = result
         self.accept()
 
     def _on_error(self, msg):

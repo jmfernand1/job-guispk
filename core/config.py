@@ -1,10 +1,11 @@
 """Resolucion de la configuracion de coordinacion (Impala).
 
 Orden de resolucion, por clave:
-1. Variables de entorno GUISPK_DSN / GUISPK_SCHEMA.
+1. Variables de entorno GUISPK_DSN / GUISPK_SCHEMA / GUISPK_BACKUP_DB.
 2. config.ini junto al ejecutable (o al cwd en desarrollo), seccion [guispk],
-   claves dsn y schema.
-3. Defaults: dsn vacio (la UI lo pide al conectar), schema proceso_enmascarado.
+   claves dsn, schema y backup_db.
+3. Defaults: dsn vacio (la UI lo pide al conectar), schema proceso_enmascarado,
+   backup_db vacio (solo lo usa el interno; la UI lo pide o se elige ahi).
 
 El config.ini NUNCA lleva credenciales: usuario y password se piden al
 arrancar (o se precargan de las env vars USERNAME / PSWD / DSNLZ).
@@ -25,9 +26,10 @@ def _base_dir() -> str:
 
 
 def resolve_settings() -> dict:
-    """{dsn, schema} para la conexion de coordinacion."""
+    """{dsn, schema, backup_db} para la conexion de coordinacion."""
     dsn = os.getenv("GUISPK_DSN", "")
     schema = os.getenv("GUISPK_SCHEMA", "")
+    backup_db = os.getenv("GUISPK_BACKUP_DB", "")
 
     ini_path = os.path.join(_base_dir(), "config.ini")
     if os.path.isfile(ini_path):
@@ -35,5 +37,12 @@ def resolve_settings() -> dict:
         parser.read(ini_path, encoding="utf-8")
         dsn = dsn or parser.get("guispk", "dsn", fallback="").strip()
         schema = schema or parser.get("guispk", "schema", fallback="").strip()
+        backup_db = backup_db or parser.get(
+            "guispk", "backup_db", fallback=""
+        ).strip()
 
-    return {"dsn": dsn, "schema": schema or ddl.DEFAULT_SCHEMA}
+    return {
+        "dsn": dsn,
+        "schema": schema or ddl.DEFAULT_SCHEMA,
+        "backup_db": os.path.expanduser(backup_db) if backup_db else "",
+    }

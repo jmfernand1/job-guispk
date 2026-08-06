@@ -199,8 +199,8 @@ def test_race_lost_event_is_ignored_by_fold(runner):
 
     # evento perdedor: cree que la solicitud sigue enviada
     repo._insert_event(
-        request_id=req["id"], code=req["code"], who="interno1",
-        role=states.ROLE_INTERNO, event_type="transicion",
+        request_id=req["id"], code=req["code"], event_by="interno1",
+        actor_role=states.ROLE_INTERNO, event_type="transicion",
         from_state=states.ENVIADA, to_state=states.EJECUTADA,
     )
     final = repo.get_request(req["id"])

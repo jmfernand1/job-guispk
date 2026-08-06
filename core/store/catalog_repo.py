@@ -28,8 +28,8 @@ class CatalogRepo:
     # -- inventario ----------------------------------------------------------
     def _insert_inventory_event(self, event_type, table_name, who, description=None):
         self._runner.execute(
-            f"INSERT INTO {self._inventory_t} (event_id, at, who, event_type, "
-            "table_name, description) VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO {self._inventory_t} (event_id, event_at, event_by, "
+            "event_type, table_name, description) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 models.new_id(),
                 models.utcnow_iso(),
@@ -52,7 +52,7 @@ class CatalogRepo:
 
     def _fold_inventory(self):
         rows = self._runner.query(f"SELECT * FROM {self._inventory_t}")
-        rows.sort(key=lambda e: (e["at"] or "", e["event_id"]))
+        rows.sort(key=lambda e: (e["event_at"] or "", e["event_id"]))
         tables = {}
         for e in rows:
             name = e["table_name"]
@@ -64,8 +64,8 @@ class CatalogRepo:
                     "table_name": name,
                     "description": e["description"],
                     "active": 1,
-                    "added_by": e["who"],
-                    "added_at": e["at"],
+                    "added_by": e["event_by"],
+                    "added_at": e["event_at"],
                 }
             elif name in tables:
                 tables[name]["active"] = (

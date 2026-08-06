@@ -5,7 +5,7 @@ runner resuelve el binding a su manera:
 
 - pyodbc (aliado) y sqlite3 (tests) soportan `?` nativo.
 - Sparky (interno) no acepta parametros: su adapter sustituye cada `?` por el
-  literal escapado en dialecto Impala (ver interno/sparky_runner.py).
+  literal escapado en dialecto Impala (ver core/sparky_runner.py).
 
 Regla para los repos: nunca escribir el caracter `?` dentro de literales del
 template — todo valor variable viaja como parametro.

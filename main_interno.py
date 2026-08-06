@@ -8,7 +8,8 @@ Smoke sin cluster (Sparky de mentira + coordinacion en memoria):
 
 La coordinacion (catalogo, solicitudes, historico) vive en Impala, esquema
 proceso_enmascarado, tablas guispk_*; se accede con la misma conexion Sparky.
-DSN y esquema se resuelven con GUISPK_DSN / config.ini (ver core/config.py).
+DSN, esquema y ruta del respaldo se resuelven con GUISPK_DSN /
+GUISPK_BACKUP_DB / config.ini (ver core/config.py).
 """
 
 import sys
@@ -40,6 +41,7 @@ def main():
         sparky_factory=sparky_factory,
         store_runner_factory=store_runner_factory,
         schema=settings["schema"],
+        backup_db=settings["backup_db"],
     )
     window.show()
     sys.exit(app.exec())

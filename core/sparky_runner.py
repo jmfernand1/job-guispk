@@ -1,4 +1,4 @@
-"""Runner de coordinacion del interno: reutiliza la conexion Sparky.
+"""Runner de coordinacion sobre una conexion Sparky (interno y aliado).
 
 Los repos de core/store generan SQL con placeholders `?`; Sparky no soporta
 binding, asi que aqui se sustituyen por literales escapados en dialecto

@@ -8,7 +8,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from core import masking, review, sql_builder, states
 from core.store import history_repo
-from interno.sparky_client import extract_columns
+from core.sparky_client import extract_columns
 
 
 class ConnectWorker(QThread):

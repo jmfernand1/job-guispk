@@ -71,9 +71,10 @@ Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tab
 - **Entorno.** Tests y apps corren con el entorno conda `guispk`. El python del sistema no
   tiene pytest ni PyQt6:
   `source /opt/miniconda3/etc/profile.d/conda.sh && conda activate guispk && python -m pytest -q`
-- **Capas.** `aliado/` **nunca** importa `interno/` ni `sparky_bc` — su ejecutable se
-  construye excluyendolos; a Impala llega solo por pyodbc + su DSN. `core/` no importa Qt
-  salvo en `core/ui/`.
+- **Capas.** `aliado/` **nunca** importa `interno/` — su ejecutable se construye
+  excluyendolo. Si puede usar `sparky_bc` a traves de `core/sparky_client.py`: llega a
+  Impala por Sparky y cae a pyodbc + su DSN si falla (`connect_impala`). `core/` no
+  importa Qt salvo en `core/ui/`.
 - **Secretos.** Las tablas `guispk_*` las leen los aliados: no pueden contener credenciales
   ni salts. El SQL se guarda con `{{TEXT_SALT}}` / `{{INT_SALT}}` y se sustituye solo al
   ejecutar. Hay tests que lo verifican; si uno falla, es un fallo de seguridad, no de forma.
@@ -81,7 +82,15 @@ Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tab
   estado es el fold de eventos (`core/store/requests_repo.py`). Nunca introducir UPDATE ni
   DELETE, y los cambios de esquema son aditivos via `_ALTERS` en `core/store/ddl.py` (nunca
   editar DDL publicado: hay .exe viejos escribiendo en las mismas tablas).
+- **Nombres de columna.** Ninguna columna puede llamarse como una palabra reservada de
+  Impala: el `CREATE TABLE` falla al desplegar. Por eso `event_at` / `event_by` /
+  `actor_role` / `note` y no `at` / `who` / `role` / `comment`. `tests/test_ddl_reserved.py`
+  parsea el DDL real y lo verifica; si falla, es el nombre lo que hay que cambiar.
 - **Latencia.** Toda llamada a repos desde la UI pasa por `core/ui/repo_worker.py`
   (QThread): contra Impala cada consulta tarda segundos. No llamar repos en el hilo de UI.
 - **Quien decide que.** El aliado pide columnas; el enmascaramiento lo decide el interno y
   solo puede restringir (`core/review.py`). No aflojar esa validacion.
+- **Respaldo.** `core/store/backup.py` copia las `guispk_*` a un SQLite en OneDrive (solo
+  la app interna). El restore **inserta lo que falta por id**, nunca borra ni actualiza:
+  un evento duplicado corrompe el fold. El esquema del espejo sale de `ddl.SCHEMA`, que es
+  la unica fuente de verdad de columnas — agregar una columna ahi la propaga sola.

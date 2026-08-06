@@ -2,7 +2,7 @@
 
 Impala/Parquet no soporta UPDATE, asi que no hay bloqueo optimista por
 UPDATE...WHERE: cada cambio es un INSERT en guispk_request_events y el estado
-vigente es el *fold* de los eventos en orden (at, event_id). El fold ignora
+vigente es el *fold* de los eventos en orden (event_at, event_id). El fold ignora
 eventos cuyo from_state no coincide con el estado plegado hasta ese punto;
 tras insertar, el repo re-pliega y, si su evento quedo ignorado (otro proceso
 gano la carrera), lanza TransitionError — el mismo contrato que tenia el
@@ -21,15 +21,18 @@ _EV_CREAR = "crear"
 _EV_TRANSICION = "transicion"
 _EV_DECISION = "decision_enmascaramiento"
 
+# Nombres fisicos de columna: ninguno puede ser palabra reservada de Impala
+# (por eso event_at/event_by/actor_role/note y no at/who/role/comment). Los
+# parametros Python de los metodos publicos siguen llamandose who/role/comment.
 _EVENT_COLS = (
-    "event_id, request_id, code, at, who, role, event_type, from_state, "
-    "to_state, requester, item_id, fields_final_json, comment, "
+    "event_id, request_id, code, event_at, event_by, actor_role, event_type, "
+    "from_state, to_state, requester, item_id, fields_final_json, note, "
     "execution_log, executed_partition_where"
 )
 
 
 def _sort_events(rows):
-    return sorted(rows, key=lambda e: (e["at"] or "", e["event_id"]))
+    return sorted(rows, key=lambda e: (e["event_at"] or "", e["event_id"]))
 
 
 def fold_events(events):
@@ -55,7 +58,7 @@ def fold_events(events):
                 "code": e["code"],
                 "state": states.BORRADOR,
                 "requester": e["requester"],
-                "created_at": e["at"],
+                "created_at": e["event_at"],
                 "sent_at": None,
                 "reviewed_by": None,
                 "reviewed_at": None,
@@ -74,20 +77,20 @@ def fold_events(events):
             to_state = e["to_state"]
             req["state"] = to_state
             if to_state == states.ENVIADA:
-                req["sent_at"] = e["at"]
+                req["sent_at"] = e["event_at"]
             elif to_state == states.RECHAZADA:
-                req["reviewed_by"] = e["who"]
-                req["reviewed_at"] = e["at"]
-                req["review_comment"] = e["comment"]
+                req["reviewed_by"] = e["event_by"]
+                req["reviewed_at"] = e["event_at"]
+                req["review_comment"] = e["note"]
             elif to_state == states.EJECUTADA:
-                req["executed_by"] = e["who"]
-                req["executed_at"] = e["at"]
+                req["executed_by"] = e["event_by"]
+                req["executed_at"] = e["event_at"]
                 req["execution_log"] = e["execution_log"]
                 req["executed_partition_where"] = e["executed_partition_where"]
                 # Sin paso de aprobacion: quien ejecuta es quien revisa.
-                req["reviewed_by"] = e["who"]
-                req["reviewed_at"] = e["at"]
-                req["review_comment"] = e["comment"]
+                req["reviewed_by"] = e["event_by"]
+                req["reviewed_at"] = e["event_at"]
+                req["review_comment"] = e["note"]
             applied.add(e["event_id"])
         elif etype == _EV_DECISION:
             # Solo vale mientras la solicitud sigue enviada (misma regla que
@@ -119,19 +122,24 @@ class RequestsRepo:
             "event_id": event_id,
             "request_id": None,
             "code": None,
-            "at": models.utcnow_iso(),
-            "who": None,
-            "role": None,
+            "event_at": models.utcnow_iso(),
+            "event_by": None,
+            "actor_role": None,
             "event_type": None,
             "from_state": None,
             "to_state": None,
             "requester": None,
             "item_id": None,
             "fields_final_json": None,
-            "comment": None,
+            "note": None,
             "execution_log": None,
             "executed_partition_where": None,
         }
+        unknown = set(values) - set(row)
+        if unknown:
+            # Sin esto un nombre viejo (who, role, comment...) se colaba como
+            # clave extra y el INSERT fallaba con "N values for 15 columns".
+            raise ValueError(f"Columnas inexistentes en el evento: {sorted(unknown)}")
         row.update(values)
         placeholders = ", ".join("?" for _ in row)
         self._runner.execute(
@@ -154,8 +162,8 @@ class RequestsRepo:
         self._insert_event(
             request_id=request_id,
             code=code,
-            who=requester,
-            role=states.ROLE_ALIADO,
+            event_by=requester,
+            actor_role=states.ROLE_ALIADO,
             event_type=_EV_CREAR,
             to_state=states.BORRADOR,
             requester=requester,
@@ -215,8 +223,8 @@ class RequestsRepo:
             )
         event_id = self._insert_event(
             request_id=request_id,
-            who=who,
-            role=states.ROLE_INTERNO,
+            event_by=who,
+            actor_role=states.ROLE_INTERNO,
             event_type=_EV_DECISION,
             item_id=item_id,
             fields_final_json=models.fields_to_json(fields),
@@ -293,8 +301,8 @@ class RequestsRepo:
                 detail = e["code"]
             elif etype == _EV_TRANSICION:
                 detail = f"{e['from_state']} -> {e['to_state']}"
-                if e["comment"]:
-                    detail += f" | {e['comment']}"
+                if e["note"]:
+                    detail += f" | {e['note']}"
             else:
                 fields = models.fields_from_json(e["fields_final_json"])
                 detail = ", ".join(
@@ -303,8 +311,8 @@ class RequestsRepo:
             trail.append(
                 {
                     "request_id": e["request_id"],
-                    "at": e["at"],
-                    "who": e["who"],
+                    "event_at": e["event_at"],
+                    "event_by": e["event_by"],
                     "action": etype,
                     "detail": detail,
                 }
@@ -333,12 +341,12 @@ class RequestsRepo:
         event_id = self._insert_event(
             request_id=request_id,
             code=req["code"],
-            who=who,
-            role=role,
+            event_by=who,
+            actor_role=role,
             event_type=_EV_TRANSICION,
             from_state=from_state,
             to_state=to_state,
-            comment=comment,
+            note=comment,
             execution_log=execution_log,
             executed_partition_where=executed_partition_where,
         )

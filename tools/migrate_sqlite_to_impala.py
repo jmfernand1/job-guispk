@@ -24,9 +24,11 @@ from core import models, states
 from core.store import ddl
 from core.store.db import open_db
 
+# Columnas destino (Impala). Ojo: las filas de origen siguen siendo del esquema
+# SQLite viejo, donde estos campos se llamaban at / who / role / comment.
 _EVENT_COLS = (
-    "event_id, request_id, code, at, who, role, event_type, from_state, "
-    "to_state, requester, item_id, fields_final_json, comment, "
+    "event_id, request_id, code, event_at, event_by, actor_role, event_type, "
+    "from_state, to_state, requester, item_id, fields_final_json, note, "
     "execution_log, executed_partition_where"
 )
 _FINAL_STATES = (states.EJECUTADA, states.RECHAZADA)
@@ -40,9 +42,10 @@ def _insert(runner, table, cols, values):
 def _event(runner, table, **values):
     row = dict.fromkeys(
         (
-            "event_id", "request_id", "code", "at", "who", "role", "event_type",
+            "event_id", "request_id", "code", "event_at", "event_by",
+            "actor_role", "event_type",
             "from_state", "to_state", "requester", "item_id",
-            "fields_final_json", "comment", "execution_log",
+            "fields_final_json", "note", "execution_log",
             "executed_partition_where",
         )
     )
@@ -67,14 +70,14 @@ def migrate(db_path: str, runner, schema: str = ddl.DEFAULT_SCHEMA, log=print) -
         for inv in inventory.values():
             _insert(
                 runner, inv_t,
-                "event_id, at, who, event_type, table_name, description",
+                "event_id, event_at, event_by, event_type, table_name, description",
                 (models.new_id(), inv["added_at"], inv["added_by"], "add",
                  inv["table_name"], inv["description"]),
             )
             if not inv["active"]:
                 _insert(
                     runner, inv_t,
-                    "event_id, at, who, event_type, table_name, description",
+                    "event_id, event_at, event_by, event_type, table_name, description",
                     (models.new_id(), models.utcnow_iso(), "migracion",
                      "deactivate", inv["table_name"], None),
                 )
@@ -115,14 +118,15 @@ def migrate(db_path: str, runner, schema: str = ddl.DEFAULT_SCHEMA, log=print) -
             request_id = models.new_id()
             _event(
                 runner, events_t, request_id=request_id, code=req["code"],
-                at=req["created_at"], who=req["requester"],
-                role=states.ROLE_ALIADO, event_type="crear",
+                event_at=req["created_at"], event_by=req["requester"],
+                actor_role=states.ROLE_ALIADO, event_type="crear",
                 to_state=states.BORRADOR, requester=req["requester"],
             )
             sent_at = req["sent_at"] or req["created_at"]
             _event(
                 runner, events_t, request_id=request_id, code=req["code"],
-                at=sent_at, who=req["requester"], role=states.ROLE_ALIADO,
+                event_at=sent_at, event_by=req["requester"],
+                actor_role=states.ROLE_ALIADO,
                 event_type="transicion", from_state=states.BORRADOR,
                 to_state=states.ENVIADA,
             )
@@ -144,29 +148,29 @@ def migrate(db_path: str, runner, schema: str = ddl.DEFAULT_SCHEMA, log=print) -
                 if item["fields_final_json"]:
                     _event(
                         runner, events_t, request_id=request_id,
-                        code=req["code"], at=req["reviewed_at"] or sent_at,
-                        who=req["reviewed_by"] or "migracion",
-                        role=states.ROLE_INTERNO,
+                        code=req["code"], event_at=req["reviewed_at"] or sent_at,
+                        event_by=req["reviewed_by"] or "migracion",
+                        actor_role=states.ROLE_INTERNO,
                         event_type="decision_enmascaramiento", item_id=item_id,
                         fields_final_json=item["fields_final_json"],
                     )
             if req["state"] == states.EJECUTADA:
                 _event(
                     runner, events_t, request_id=request_id, code=req["code"],
-                    at=req["executed_at"], who=req["executed_by"],
-                    role=states.ROLE_INTERNO, event_type="transicion",
+                    event_at=req["executed_at"], event_by=req["executed_by"],
+                    actor_role=states.ROLE_INTERNO, event_type="transicion",
                     from_state=states.ENVIADA, to_state=states.EJECUTADA,
-                    comment=req["review_comment"],
+                    note=req["review_comment"],
                     execution_log=req["execution_log"],
                     executed_partition_where=req["executed_partition_where"],
                 )
             else:
                 _event(
                     runner, events_t, request_id=request_id, code=req["code"],
-                    at=req["reviewed_at"], who=req["reviewed_by"],
-                    role=states.ROLE_INTERNO, event_type="transicion",
+                    event_at=req["reviewed_at"], event_by=req["reviewed_by"],
+                    actor_role=states.ROLE_INTERNO, event_type="transicion",
                     from_state=states.ENVIADA, to_state=states.RECHAZADA,
-                    comment=req["review_comment"],
+                    note=req["review_comment"],
                 )
             counts["solicitudes"] += 1
 
@@ -174,7 +178,7 @@ def migrate(db_path: str, runner, schema: str = ddl.DEFAULT_SCHEMA, log=print) -
         for h in con.execute("SELECT * FROM script_history ORDER BY id"):
             _insert(
                 runner, hist_t,
-                "script_id, at, who, origin, request_code, src_table, "
+                "script_id, event_at, event_by, origin, request_code, src_table, "
                 "dest_table, partition_where, salt_label, script, status, error",
                 (models.new_id(), h["at"], h["who"], h["origin"],
                  h["request_code"], h["src_table"], h["dest_table"],
@@ -212,8 +216,8 @@ def main():
     if args.dry_run:
         runner = _DryRunRunner()
     else:
-        from interno.sparky_client import SparkyClient, credentials_from_env
-        from interno.sparky_runner import SparkyRunner
+        from core.sparky_client import SparkyClient, credentials_from_env
+        from core.sparky_runner import SparkyRunner
 
         creds = credentials_from_env()
         if not all(creds.values()):

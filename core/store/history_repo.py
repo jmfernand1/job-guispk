@@ -37,7 +37,7 @@ class HistoryRepo:
     ) -> str:
         script_id = models.new_id()
         self._runner.execute(
-            f"INSERT INTO {self._table} (script_id, at, who, origin, "
+            f"INSERT INTO {self._table} (script_id, event_at, event_by, origin, "
             "request_code, src_table, dest_table, partition_where, salt_label, "
             "script, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -65,12 +65,12 @@ class HistoryRepo:
             like = f"%{search.strip()}%"
             query += (
                 " WHERE src_table LIKE ? OR dest_table LIKE ? "
-                "OR request_code LIKE ? OR who LIKE ?"
+                "OR request_code LIKE ? OR event_by LIKE ?"
             )
             params = [like, like, like, like]
         # limit inlined: es un int propio, y el ODBC de Impala no soporta
         # parametros en LIMIT.
-        query += f" ORDER BY at DESC, script_id DESC LIMIT {int(limit)}"
+        query += f" ORDER BY event_at DESC, script_id DESC LIMIT {int(limit)}"
         rows = self._runner.query(query, tuple(params))
         for row in rows:
             row["id"] = row["script_id"]

@@ -25,7 +25,7 @@ from core import sql_builder
 from core.store import history_repo
 from core.ui.column_table import ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
-from interno.sparky_client import extract_columns
+from core.sparky_client import extract_columns
 from interno.workers import DescribeWorker, ExecuteWorker
 
 

@@ -1,10 +1,12 @@
 """Ventana principal de la app INTERNA (PyQt6, pestanas).
 
-Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Historico | Ad-hoc.
+Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Historico | Ad-hoc
+| Respaldo.
 
 En Solicitudes el interno decide el enmascaramiento de cada columna pedida por
 el aliado y ejecuta o rechaza; en Historico consulta y re-ejecuta los scripts
-que ya corrio.
+que ya corrio; en Respaldo copia las guispk_* a un .db en OneDrive y las
+restaura desde ahi si las borran.
 """
 
 from PyQt6.QtCore import Qt
@@ -29,6 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core import review, states
+from core.store import backup as backup_mod
 from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
 from core.store.history_repo import HistoryRepo
@@ -36,9 +39,9 @@ from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
 from core.ui.column_table import ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
+from core.sparky_client import SparkyClient, credentials_from_env
+from core.sparky_runner import SparkyRunner
 from interno import salts as salts_mod
-from interno.sparky_client import SparkyClient, credentials_from_env
-from interno.sparky_runner import SparkyRunner
 from interno.ui.adhoc_panel import AdHocPanel
 from interno.workers import (
     CatalogRefreshWorker,
@@ -63,6 +66,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         sparky_factory=None,
         store_runner_factory=None,
         schema: str = ddl.DEFAULT_SCHEMA,
+        backup_db: str = "",
     ):
         super().__init__()
         self.setWindowTitle("Enmascarador de datos - INTERNO")
@@ -71,6 +75,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self.client = SparkyClient(sparky_factory=sparky_factory)
         self._store_runner_factory = store_runner_factory or SparkyRunner
         self._schema = schema
+        self._store_runner = None  # lo necesita el respaldo (no pasa por repos)
         self.catalog_repo = None
         self.requests_repo = None
         self.history_repo = None
@@ -98,6 +103,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
             ),
             "Ad-hoc",
         )
+        tabs.addTab(self._build_backup_tab(backup_db), "Respaldo")
 
         self.status_label = QLabel("Conecta a Sparky para cargar la coordinacion.")
         self.statusBar().addWidget(self.status_label)
@@ -187,6 +193,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self._run_async(_init_store, self._on_store_ready, self._on_store_error)
 
     def _on_store_ready(self, runner):
+        self._store_runner = runner
         self.catalog_repo = CatalogRepo(runner, self._schema)
         self.requests_repo = RequestsRepo(runner, self._schema)
         self.history_repo = HistoryRepo(runner, self._schema)
@@ -617,8 +624,8 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
             )
             for col, val in enumerate(
                 [
-                    h["at"],
-                    h["who"],
+                    h["event_at"],
+                    h["event_by"],
                     origen,
                     h["dest_table"],
                     h["salt_label"] or "-",
@@ -678,7 +685,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         resp = QMessageBox.question(
             self,
             "Re-ejecutar script",
-            f"Se re-ejecuta tal cual el script de {entry['at']}:\n"
+            f"Se re-ejecuta tal cual el script de {entry['event_at']}:\n"
             f"  {entry['src_table']} -> {entry['dest_table']}\n"
             f"  WHERE {entry['partition_where'] or 'sin particion'}\n\n"
             f"La tabla destino se ELIMINA (DROP ... PURGE) y se recrea.\n"
@@ -803,11 +810,168 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         QMessageBox.critical(self, "Error al ejecutar", msg)
         self._reload_requests()
 
+    # ======================================================================
+    # Tab 7: Respaldo
+    # ======================================================================
+    def _build_backup_tab(self, backup_db: str):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.addWidget(
+            QLabel(
+                "Copia de las tablas guispk_* a un archivo .db (OneDrive del "
+                "equipo interno).\nSi borran las tablas en "
+                f"{self._schema}, el restore las repuebla desde aqui."
+            )
+        )
+
+        path_row = QHBoxLayout()
+        self.backup_path_edit = QLineEdit(backup_db)
+        self.backup_path_edit.setPlaceholderText(
+            "Ruta del .db de respaldo (config.ini: backup_db)"
+        )
+        browse_btn = QPushButton("Elegir...")
+        browse_btn.clicked.connect(self.on_pick_backup_path)
+        path_row.addWidget(QLabel("Archivo:"))
+        path_row.addWidget(self.backup_path_edit)
+        path_row.addWidget(browse_btn)
+        lay.addLayout(path_row)
+
+        btn_row = QHBoxLayout()
+        self.backup_btn = QPushButton("Respaldar ahora")
+        self.backup_btn.clicked.connect(self.on_backup)
+        self.restore_btn = QPushButton("Restaurar desde el respaldo")
+        self.restore_btn.clicked.connect(self.on_restore)
+        self.backup_info_btn = QPushButton("Ver contenido del respaldo")
+        self.backup_info_btn.clicked.connect(self.on_backup_summary)
+        btn_row.addWidget(self.backup_btn)
+        btn_row.addWidget(self.restore_btn)
+        btn_row.addWidget(self.backup_info_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        self.backup_log = QPlainTextEdit()
+        self.backup_log.setReadOnly(True)
+        self.backup_log.setPlaceholderText(
+            "El respaldo es una foto: reemplaza el .db entero.\n"
+            "El restore solo inserta lo que falta, nunca borra ni duplica."
+        )
+        lay.addWidget(self.backup_log)
+        return page
+
+    def _backup_path(self):
+        path = self.backup_path_edit.text().strip()
+        if not path:
+            QMessageBox.warning(
+                self, "Sin archivo",
+                "Indica la ruta del .db de respaldo (o ponla en config.ini "
+                "como backup_db).",
+            )
+            return None
+        return path
+
+    def _backup_busy(self, busy: bool):
+        for btn in (self.backup_btn, self.restore_btn, self.backup_info_btn):
+            btn.setEnabled(not busy)
+
+    def on_pick_backup_path(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Archivo de respaldo", self.backup_path_edit.text(),
+            "SQLite (*.db)",
+        )
+        if path:
+            self.backup_path_edit.setText(path)
+
+    def on_backup(self):
+        if not self._require_store():
+            return
+        path = self._backup_path()
+        if not path:
+            return
+        runner, schema = self._store_runner, self._schema
+        self._backup_busy(True)
+        self.backup_log.setPlainText(f"Respaldando en {path}...")
+        self._run_async(
+            lambda: backup_mod.backup(runner, path, schema),
+            self._on_backup_done,
+            self._on_backup_error,
+        )
+
+    def _on_backup_done(self, counts):
+        self._backup_busy(False)
+        total = sum(counts.values())
+        lines = [f"Respaldo completo: {total} filas."]
+        lines += [f"  {t}: {n}" for t, n in counts.items()]
+        self.backup_log.setPlainText("\n".join(lines))
+        self._set_status("Respaldo completo.")
+
+    def on_restore(self):
+        if not self._require_store():
+            return
+        path = self._backup_path()
+        if not path:
+            return
+        resp = QMessageBox.question(
+            self, "Restaurar coordinacion",
+            f"Se reinsertan en {self._schema} las filas del respaldo que no "
+            "esten ya ahi.\n\nNo borra ni modifica nada de lo que exista "
+            "(las guispk_* son append-only) y se puede repetir sin duplicar.\n"
+            "Las tablas tienen que existir: si las borraron, reconecta primero "
+            "para que se recreen.\n\nContinuar?",
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        runner, schema = self._store_runner, self._schema
+        self._backup_busy(True)
+        self.backup_log.setPlainText(f"Restaurando desde {path}...")
+        self._run_async(
+            lambda: backup_mod.restore(runner, path, schema),
+            self._on_restore_done,
+            self._on_backup_error,
+        )
+
+    def _on_restore_done(self, counts):
+        self._backup_busy(False)
+        insertadas = sum(c["insertadas"] for c in counts.values())
+        lines = [f"Restore completo: {insertadas} filas insertadas."]
+        lines += [
+            f"  {t}: {c['insertadas']} insertadas, {c['omitidas']} ya estaban"
+            for t, c in counts.items()
+        ]
+        self.backup_log.setPlainText("\n".join(lines))
+        self._set_status("Restore completo.")
+        self._reload_inventory()
+        self._reload_catalog()
+        self._reload_requests()
+        self._reload_history()
+
+    def on_backup_summary(self):
+        path = self._backup_path()
+        if not path:
+            return
+        self._backup_busy(True)
+        self._run_async(
+            lambda: backup_mod.summary(path),
+            self._on_backup_summary_done,
+            self._on_backup_error,
+        )
+
+    def _on_backup_summary_done(self, counts):
+        self._backup_busy(False)
+        lines = ["Contenido del respaldo:"]
+        lines += [f"  {t}: {n} filas" for t, n in counts.items()]
+        self.backup_log.setPlainText("\n".join(lines))
+
+    def _on_backup_error(self, msg):
+        self._backup_busy(False)
+        self.backup_log.setPlainText(f"Error: {msg}")
+        self._set_status("Error en el respaldo.")
+        QMessageBox.critical(self, "Respaldo", msg)
+
 
 def _render_history_entry(entry) -> str:
     """Ficha de una ejecucion del historico, con su script."""
     lines = [
-        f"Ejecutado : {entry['at']} por {entry['who']}",
+        f"Ejecutado : {entry['event_at']} por {entry['event_by']}",
         f"Origen    : {entry['origin']}"
         + (f" ({entry['request_code']})" if entry["request_code"] else ""),
         f"Tablas    : {entry['src_table']} -> {entry['dest_table']}",
