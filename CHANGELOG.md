@@ -21,7 +21,8 @@ Para el estado **actual** del sistema — como funciona hoy, no por que — ve a
 | [006](docs/decisiones/006-coordinacion-impala-append-only.md) | La coordinacion se muda del SQLite/OneDrive a tablas `guispk_*` **append-only en Impala** (`proceso_enmascarado`); supersede parcialmente 001. | `#bd` `#arquitectura` `#seguridad` | 2026-08-05 |
 | [007](docs/decisiones/007-columnas-sin-palabras-reservadas.md) | Ninguna columna se llama como palabra reservada: `at`/`who`/`role`/`comment` pasan a `event_at`/`event_by`/`actor_role`/`note`. | `#bd` `#sql` | 2026-08-06 |
 | [008](docs/decisiones/008-aliado-sparky-con-fallback-odbc.md) | El aliado se conecta por **Sparky** y cae a **ODBC** si falla; el adaptador se muda a `core/`. | `#arquitectura` `#seguridad` `#ui-aliado` | 2026-08-06 |
-| [009](docs/decisiones/009-respaldo-sqlite-de-las-tablas-guispk.md) | El interno respalda las `guispk_*` a un `.db` en OneDrive y **restaura** desde ahi si las borran. | `#bd` `#seguridad` `#ui-interno` | 2026-08-06 |
+| [009](docs/decisiones/009-respaldo-sqlite-de-las-tablas-guispk.md) | El interno respalda las `guispk_*` a un `.db` en OneDrive y **restaura** desde ahi si las borran; agendable con `tools/backup_guispk.py`. | `#bd` `#seguridad` `#ui-interno` | 2026-08-06 |
+| [010](docs/decisiones/010-destino-particionado-como-el-origen.md) | La tabla destino se crea con `PARTITIONED BY` heredando las columnas de particion del origen. | `#sql` | 2026-08-07 |
 
 ## Tags
 
@@ -31,7 +32,7 @@ Para el estado **actual** del sistema — como funciona hoy, no por que — ve a
 - `#enmascaramiento` — quien decide que se enmascara: 003
 - `#historico` — registro y re-ejecucion de scripts: 005
 - `#seguridad` — salts, secretos y limites de confianza: 001, 003, 005, 006, 008, 009
-- `#sql` — forma del SQL generado: 004, 007
+- `#sql` — forma del SQL generado: 004, 007, 010
 - `#ui-aliado` — pantallas del aliado: 003, 008
 - `#ui-interno` — pantallas del equipo interno: 002, 003, 005, 009
 

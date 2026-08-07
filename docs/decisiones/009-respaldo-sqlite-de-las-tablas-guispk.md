@@ -55,15 +55,34 @@ salts, ese test falla.
 
 ## Consecuencias
 
-- **El respaldo es manual.** Protege contra el borrado, no contra el olvido: lo
-  que no se respaldo desde el ultimo clic, se pierde. Si molesta, el siguiente
-  paso natural es un entry point de linea de comandos sobre
-  `backup.backup(...)` para agendarlo.
+- Ademas de la pestana, hay un entry point sin UI para agendar:
+  `python -m tools.backup_guispk` (ver *Agendado* abajo). La pestana sirve para
+  el respaldo puntual antes de un cambio y para el restore; el agendado es el
+  que cubre el olvido.
 - El restore **necesita las tablas creadas**. Tras un `DROP`, reconectar la app
   interna las recrea (`ensure_remote_schema`) y recien ahi se restaura.
 - Un `.db` de respaldo desactualizado que se restaure sobre tablas vivas no
   rompe nada: lo que ya esta se omite, y lo viejo que reaparezca es historia
   que el fold ya sabe ignorar si no encaja.
+
+## Agendado
+
+`tools/backup_guispk.py` hace lo mismo que la pestana, sin UI:
+
+```
+python -m tools.backup_guispk              # respalda (ruta del config.ini)
+python -m tools.backup_guispk --restore    # recrea el esquema y repuebla
+python -m tools.backup_guispk --summary    # que hay en el .db, sin tocar Impala
+```
+
+Las credenciales salen de `USERNAME` / `PSWD` / `DSNLZ` y **no se aceptan por
+argumento**: quedarian en el historial de la shell y en la definicion de la
+tarea agendada. Termina con codigo 0 o 1, que es lo unico que mira el
+agendador para avisar de un fallo.
+
+`--restore` corre `ensure_remote_schema` antes de restaurar, asi que cubre el
+caso feo entero: borraron las tablas, se recrean vacias y se repueblan en un
+solo comando.
 
 ## Nota al margen: bug encontrado en `tests/fake_impala.py`
 
@@ -77,4 +96,5 @@ reventaba comparando float con str. El DDL del fake ahora traduce
 ## Archivos
 
 `core/store/{backup,ddl}.py`, `core/config.py`, `config.ini.example`,
-`interno/ui/main_window.py`, `main_interno.py`, `tests/{test_backup,fake_impala}.py`.
+`interno/ui/main_window.py`, `main_interno.py`, `tools/backup_guispk.py`,
+`tests/{test_backup,test_backup_cli,fake_impala}.py`.

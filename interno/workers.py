@@ -220,21 +220,30 @@ class ExecuteRequestWorker(QThread):
                     )
                 review.validate_final_fields(item["fields"], final)
 
+                # Las columnas de particion se leen del origen al ejecutar (no
+                # del snapshot): el destino se crea particionado igual que la
+                # fuente, y si la fuente cambio, manda la fuente.
+                part_cols = None
                 if item["partition_where_requested"]:
                     try:
-                        fresh_where = self._client.get_partition(src)
+                        part_cols, fresh_where = self._client.get_partition_info(src)
                     except Exception as exc:  # noqa: BLE001
                         fresh_where = item["partition_where_requested"]
                         log.append(
                             f"{src}: no se pudo re-resolver la particion ({exc}); "
-                            "se usa el WHERE de la solicitud."
+                            "se usa el WHERE de la solicitud y el destino queda "
+                            "sin particionar."
                         )
                 else:
                     fresh_where = None
 
                 drop, create, insert, script = sql_builder.build_request_script(
-                    final, src, dest, fresh_where
+                    final, src, dest, fresh_where, part_cols
                 )
+                if part_cols:
+                    log.append(
+                        f"{dest}: particionado por {', '.join(part_cols)}."
+                    )
                 self.progress.emit(f"[{i}/{len(req['items'])}] DROP {dest}...")
                 self._client.run(drop)
                 self.progress.emit(f"[{i}/{len(req['items'])}] CREATE {dest}...")

@@ -114,6 +114,10 @@ Dos campos de `request_items` concentran el reparto de responsabilidades:
   que va a crear haya sido solicitada por el aliado y conserve su tipo.
 - La particion se **re-resuelve** contra Impala al momento de ejecutar y el
   WHERE realmente usado queda registrado en la solicitud.
+- La tabla destino se crea **particionada igual que el origen**
+  (`PARTITIONED BY`), solo por las columnas de particion que el interno dejo
+  salir. En Impala esas columnas no se repiten en la lista de columnas, llevan
+  su tipo, y el INSERT es dinamico con ellas al final del SELECT.
 - El historico guarda los scripts **con placeholders**, nunca con los salts
   reales: las tablas de coordinacion las leen los aliados. Al re-ejecutar se
   sustituyen con los salts locales de la maquina interna.
@@ -211,6 +215,16 @@ estado final. Las pendientes (`borrador`/`enviada`) se recrean a mano.
    Tras un borrado hay que **reconectar primero** para que se recreen las
    tablas, y despues restaurar.
 
+Para agendar el respaldo (Programador de tareas / cron), sin UI:
+
+```bash
+python -m tools.backup_guispk
+```
+
+`--restore` repuebla Impala (recrea el esquema primero) y `--summary` informa
+que hay en el `.db` sin conectarse. Credenciales por `USERNAME` / `PSWD` /
+`DSNLZ`; nunca por argumento. Termina con codigo 0 o 1.
+
 ### App aliado (pestanas)
 
 Al arrancar pide usuario/contrasena/DSN de Impala (dialogo modal).
@@ -273,7 +287,8 @@ aliado/                  app aliado: impala_client (Sparky, con fallback a
                          interno/)
 main_interno.py          entrada app interna (--fake para smoke)
 main_aliado.py           entrada app aliado (--fake para smoke)
-tools/                   migrate_sqlite_to_impala (import unico del guispk.db)
+tools/                   migrate_sqlite_to_impala (import unico del guispk.db),
+                         backup_guispk (respaldo/restore agendable, sin UI)
 tests/                   pytest + fake_sparky + fake_impala
 docs/decisiones/         una decision de diseno por archivo (ver CHANGELOG.md)
 ```

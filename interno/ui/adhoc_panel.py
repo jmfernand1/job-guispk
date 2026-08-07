@@ -195,9 +195,11 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         try:
             fields = self.table.selected_fields()
             try:
-                where_clause = self.client.get_partition(self.src_edit.text().strip())
+                part_cols, where_clause = self.client.get_partition_info(
+                    self.src_edit.text().strip()
+                )
             except Exception:  # noqa: BLE001 - tabla sin particiones
-                where_clause = None
+                part_cols, where_clause = None, None
             drop, create, insert, script = sql_builder.build_script(
                 fields,
                 self.src_edit.text().strip(),
@@ -205,6 +207,7 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
                 self.text_salt_edit.text(),
                 self.int_salt_edit.text(),
                 where_clause,
+                part_cols,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))
@@ -221,6 +224,7 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
             self.src_edit.text().strip(),
             self.dest_edit.text().strip(),
             where_clause,
+            part_cols,
         )[3]
         self.sql_view.setPlainText(script)
         self.save_btn.setEnabled(True)

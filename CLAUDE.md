@@ -91,6 +91,12 @@ Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tab
 - **Quien decide que.** El aliado pide columnas; el enmascaramiento lo decide el interno y
   solo puede restringir (`core/review.py`). No aflojar esa validacion.
 - **Respaldo.** `core/store/backup.py` copia las `guispk_*` a un SQLite en OneDrive (solo
-  la app interna). El restore **inserta lo que falta por id**, nunca borra ni actualiza:
-  un evento duplicado corrompe el fold. El esquema del espejo sale de `ddl.SCHEMA`, que es
-  la unica fuente de verdad de columnas — agregar una columna ahi la propaga sola.
+  la app interna; agendable con `tools/backup_guispk.py`). El restore **inserta lo que
+  falta por id**, nunca borra ni actualiza: un evento duplicado corrompe el fold. El
+  esquema del espejo sale de `ddl.SCHEMA`, que es la unica fuente de verdad de columnas —
+  agregar una columna ahi la propaga sola.
+- **Particionado.** El destino hereda las columnas de particion del origen
+  (`sql_builder.build_create/build_insert`). En Impala no se repiten en la lista de
+  columnas, llevan tipo, y en el INSERT van al final del SELECT con `PARTITION (...)`.
+  `partition_cols=None` tiene que seguir dando el SQL de antes: las solicitudes viejas se
+  verifican regenerando su script y comparandolo con el guardado.
