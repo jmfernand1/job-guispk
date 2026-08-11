@@ -37,7 +37,7 @@ from core.store.catalog_repo import CatalogRepo
 from core.store.history_repo import HistoryRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
-from core.ui.column_table import ColumnTable
+from core.ui.column_table import ColumnFilterBar, ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
 from core.sparky_client import SparkyClient, credentials_from_env
 from core.sparky_runner import SparkyRunner
@@ -513,8 +513,15 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
                 table.update_salts(salts["text_salt"], salts["int_salt"])
             table.setEnabled(editable)
             self._item_tables.append(table)
+            # el buscador queda activo aunque la tabla no sea editable: filtrar
+            # es solo vista y ayuda a revisar items de cientos de columnas
+            page = QWidget()
+            page_lay = QVBoxLayout(page)
+            page_lay.setContentsMargins(0, 0, 0, 0)
+            page_lay.addWidget(ColumnFilterBar(table))
+            page_lay.addWidget(table)
             self.item_tabs.addTab(
-                table, f"{item['src_table']} -> {item['dest_table']}"
+                page, f"{item['src_table']} -> {item['dest_table']}"
             )
 
     def _update_request_buttons(self):

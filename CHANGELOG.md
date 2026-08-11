@@ -23,6 +23,7 @@ Para el estado **actual** del sistema — como funciona hoy, no por que — ve a
 | [008](docs/decisiones/008-aliado-sparky-con-fallback-odbc.md) | El aliado se conecta por **Sparky** y cae a **ODBC** si falla; el adaptador se muda a `core/`. | `#arquitectura` `#seguridad` `#ui-aliado` | 2026-08-06 |
 | [009](docs/decisiones/009-respaldo-sqlite-de-las-tablas-guispk.md) | El interno respalda las `guispk_*` a un `.db` en OneDrive y **restaura** desde ahi si las borran; agendable con `tools/backup_guispk.py`. | `#bd` `#seguridad` `#ui-interno` | 2026-08-06 |
 | [010](docs/decisiones/010-destino-particionado-como-el-origen.md) | La tabla destino se crea con `PARTITIONED BY` heredando las columnas de particion del origen. | `#sql` | 2026-08-07 |
+| [011](docs/decisiones/011-buscador-de-columnas.md) | Buscador que filtra columnas mientras se escribe en las tres vistas de seleccion; "Seleccionar todo" pasa a actuar solo sobre las visibles. | `#ui-aliado` `#ui-interno` | 2026-08-11 |
 
 ## Tags
 
@@ -33,8 +34,8 @@ Para el estado **actual** del sistema — como funciona hoy, no por que — ve a
 - `#historico` — registro y re-ejecucion de scripts: 005
 - `#seguridad` — salts, secretos y limites de confianza: 001, 003, 005, 006, 008, 009
 - `#sql` — forma del SQL generado: 004, 007, 010
-- `#ui-aliado` — pantallas del aliado: 003, 008
-- `#ui-interno` — pantallas del equipo interno: 002, 003, 005, 009
+- `#ui-aliado` — pantallas del aliado: 003, 008, 011
+- `#ui-interno` — pantallas del equipo interno: 002, 003, 005, 009, 011
 
 ## Como agregar una decision
 

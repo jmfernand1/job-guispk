@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 
 from core import sql_builder
 from core.store import history_repo
-from core.ui.column_table import ColumnTable
+from core.ui.column_table import ColumnFilterBar, ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
 from core.sparky_client import extract_columns
 from interno.workers import DescribeWorker, ExecuteWorker
@@ -81,6 +81,7 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         btn_row.addStretch()
         lay.addLayout(btn_row)
         self.table = ColumnTable()
+        lay.addWidget(ColumnFilterBar(self.table))
         lay.addWidget(self.table)
         return box
 

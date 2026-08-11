@@ -35,7 +35,7 @@ from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
-from core.ui.column_table import ColumnTable
+from core.ui.column_table import ColumnFilterBar, ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
 
 
@@ -125,6 +125,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         btn_row.addStretch()
         col_lay.addLayout(btn_row)
         self.table = ColumnTable(with_masking=False)
+        col_lay.addWidget(ColumnFilterBar(self.table))
         col_lay.addWidget(self.table)
         lay.addWidget(col_box)
 
