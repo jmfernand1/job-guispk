@@ -4,7 +4,9 @@ Pestanas: Conexion | Inventario | Catalogo | Solicitudes | Historico | Ad-hoc
 | Respaldo.
 
 En Solicitudes el interno decide el enmascaramiento de cada columna pedida por
-el aliado y ejecuta o rechaza; en Historico consulta y re-ejecuta los scripts
+el aliado y ejecuta, rechaza o exporta el SQL a un .sql para editarlo y correrlo
+por fuera cuando la corrida necesita otra variante; en Historico consulta y
+re-ejecuta los scripts
 que ya corrio; en Respaldo copia las guispk_* a un .db en OneDrive y las
 restaura desde ahi si las borran.
 """
@@ -30,7 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import review, states
+from core import masking, review, sql_builder, states
 from core.store import backup as backup_mod
 from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
@@ -44,6 +46,7 @@ from core.sparky_runner import SparkyRunner
 from interno import salts as salts_mod
 from interno.ui.adhoc_panel import AdHocPanel
 from interno.workers import (
+    BuildScriptsWorker,
     CatalogRefreshWorker,
     ConnectWorker,
     ExecuteRequestWorker,
@@ -86,6 +89,7 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self._current_script = None
         self._inventory = []
         self._requests = []
+        self._export = None  # exportacion de SQL en curso (destino y salts)
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
@@ -438,7 +442,13 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self.execute_btn.clicked.connect(self.on_execute_request)
         self.reject_btn = QPushButton("Rechazar")
         self.reject_btn.clicked.connect(self.on_reject)
-        for b in (self.execute_btn, self.reject_btn):
+        self.export_sql_btn = QPushButton("Exportar SQL (.sql)")
+        self.export_sql_btn.setToolTip(
+            "Guarda el SQL que se ejecutaria, con las mascaras elegidas en "
+            "pantalla, para editarlo y correrlo por fuera de la app."
+        )
+        self.export_sql_btn.clicked.connect(self.on_export_request_sql)
+        for b in (self.execute_btn, self.reject_btn, self.export_sql_btn):
             b.setEnabled(False)
             btn_row.addWidget(b)
         btn_row.addStretch()
@@ -529,6 +539,9 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         state = req["state"] if req else None
         self.execute_btn.setEnabled(state == states.ENVIADA)
         self.reject_btn.setEnabled(state == states.ENVIADA)
+        # exportar es solo lectura: sirve tambien para una solicitud ya
+        # ejecutada o rechazada, que carga sus columnas en modo consulta.
+        self.export_sql_btn.setEnabled(req is not None and bool(self._item_tables))
 
     def _do_transition(self, to_state, comment=None):
         request_id, who = self._current_request["id"], self._who()
@@ -816,6 +829,107 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self._set_status(f"Error al ejecutar solicitud: {msg}")
         QMessageBox.critical(self, "Error al ejecutar", msg)
         self._reload_requests()
+
+    def on_export_request_sql(self):
+        """Guarda en un .sql el SQL que se ejecutaria, para editarlo a mano.
+
+        Sale con los salts reales sustituidos, como el panel Ad-hoc: el archivo
+        se hizo para ejecutarse por fuera, no para compartirse. Lo que se corra
+        desde ahi no pasa por la app y no queda en el historico.
+        """
+        req = self._current_request
+        if not req:
+            return
+        try:
+            salts = salts_mod.load_salts()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Salts no disponibles", str(exc))
+            return
+        try:
+            decisions = self._collect_decisions(req)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Revisa el enmascaramiento", str(exc))
+            return
+        if not self.client.connected:
+            resp = QMessageBox.question(
+                self,
+                "Sin conexion",
+                "Sin conexion no se puede re-resolver la particion contra "
+                "Impala: el script saldra con el WHERE de la solicitud y el "
+                "destino sin particionar.\n\nExportar de todas formas?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar SQL de la solicitud", f"{req['code']}.sql", "SQL (*.sql)"
+        )
+        if not path:
+            return
+        self._export = {
+            "path": path,
+            "salts": salts,
+            "code": req["code"],
+            "who": self._who(),
+        }
+        self.export_sql_btn.setEnabled(False)
+        self._set_status("Armando el SQL de la solicitud...")
+        self._worker = BuildScriptsWorker(self.client, req, decisions)
+        self._worker.progress.connect(self._set_status)
+        self._worker.finished.connect(self._on_request_sql_built)
+        self._worker.error.connect(self._on_request_sql_error)
+        self._worker.start()
+
+    def _on_request_sql_built(self, results):
+        pendiente, self._export = self._export, None
+        self.export_sql_btn.setEnabled(True)
+        if not pendiente:
+            return
+        salts = pendiente["salts"]
+        avisos = [r["aviso"] for r in results if r["aviso"]]
+        header = [
+            f"SQL de la solicitud {pendiente['code']} exportado por "
+            f"{pendiente['who']}",
+            f"Salt aplicado: {salts['label']}",
+            "ATENCION: este archivo lleva los salts REALES ya sustituidos. No "
+            "lo subas a un repositorio ni se lo pases al aliado.",
+            "Lo que ejecutes desde aqui no pasa por la app: no queda en el "
+            "historico ni cambia el estado de la solicitud.",
+        ] + avisos
+        entries = [
+            (
+                f"{r['src_table']} -> {r['dest_table']} "
+                f"(WHERE {r['partition_where'] or 'sin particion'})",
+                r["script"],
+            )
+            for r in results
+        ]
+        documento = masking.apply_salts(
+            sql_builder.build_export_script(entries, header),
+            salts["text_salt"],
+            salts["int_salt"],
+        )
+        try:
+            with open(pendiente["path"], "w", encoding="utf-8") as fh:
+                fh.write(documento)
+        except OSError as exc:
+            self._set_status(f"No se pudo guardar el SQL: {exc}")
+            QMessageBox.critical(self, "No se pudo guardar", str(exc))
+            return
+        self._set_status(f"SQL exportado en {pendiente['path']}")
+        QMessageBox.information(
+            self,
+            "SQL exportado",
+            f"{len(results)} tabla(s) en:\n{pendiente['path']}\n\n"
+            f"Contiene los salts reales ({salts['label']}): no lo compartas.\n"
+            + ("\n".join(avisos) if avisos else ""),
+        )
+
+    def _on_request_sql_error(self, msg):
+        self._export = None
+        self.export_sql_btn.setEnabled(True)
+        self._set_status(f"Error al armar el SQL: {msg}")
+        QMessageBox.critical(self, "No se pudo exportar el SQL", msg)
 
     # ======================================================================
     # Tab 7: Respaldo

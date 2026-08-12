@@ -58,7 +58,10 @@ Funciones de enmascaramiento (UDFs en la Landing Zone):
 3. **Interno — Solicitudes.** Con el filtro en `enviada` abre la solicitud: arriba el
    detalle, abajo una tabla con las columnas pedidas. Elige la mascara de cada una,
    desmarca lo que no deba salir y *Ejecutar solicitud*. El dialogo resume las mascaras,
-   cuantas columnas se excluyen y avisa que el destino se elimina y se recrea.
+   cuantas columnas se excluyen y avisa que el destino se elimina y se recrea. Si la
+   corrida necesita otra variante, *Exportar SQL (.sql)* guarda ese mismo SQL en un
+   archivo para editarlo y correrlo por fuera (sale con los salts reales: no se comparte,
+   y lo que se ejecute asi no queda en el historico).
 4. **Aliado — Mis solicitudes.** Ve la solicitud ejecutada con el enmascaramiento que
    aplico el interno y las columnas excluidas; puede exportar el detalle en `.txt`.
 5. **Interno — Historico.** El script quedo registrado. Si hay que repetir la corrida
@@ -202,7 +205,11 @@ estado final. Las pendientes (`borrador`/`enviada`) se recrean a mano.
    (y desmarcar las que no deban salir) y decidir en un solo paso:
    *Ejecutar solicitud* (guarda la decision auditada, verifica, re-resuelve
    particion, aplica salts, corre DROP + CREATE + INSERT y marca ejecutada con
-   log) o *Rechazar* (con motivo).
+   log) o *Rechazar* (con motivo). *Exportar SQL (.sql)* arma el mismo SQL que
+   ejecutaria — con las mascaras de pantalla y la particion re-resuelta — y lo
+   guarda en un archivo con los salts ya sustituidos, para editarlo y correrlo
+   por fuera; no persiste la decision ni cambia el estado, asi que tambien sirve
+   sobre solicitudes ya ejecutadas.
 5. **Historico** — todos los scripts ejecutados (solicitudes, ad-hoc y
    re-ejecuciones), con buscador por tabla/solicitud/usuario. Permite ver el
    script, guardarlo como `.sql` y **re-ejecutarlo** tal cual (avisa si el salt

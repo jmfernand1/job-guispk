@@ -3,7 +3,8 @@
 `build_script` devuelve (drop, create, insert, script_completo): cada corrida
 arranca con DROP ... PURGE, asi que recrear el destino no falla si ya existe.
 `build_request_preview` genera el texto de la solicitud del aliado (columnas
-pedidas, sin enmascaramiento) y `split_statements` parte un script guardado
+pedidas, sin enmascaramiento), `build_export_script` junta los scripts de una
+solicitud en un archivo editable y `split_statements` parte un script guardado
 para re-ejecutarlo desde el historico.
 
 Sin dependencias de UI ni de red: testeable de forma aislada.
@@ -152,6 +153,24 @@ def build_script(
         f"{insert}\n"
     )
     return drop, create, insert, script
+
+
+def build_export_script(entries, header_lines=None) -> str:
+    """Une los scripts de varias tablas en un solo .sql exportable.
+
+    `entries` es [(titulo, script)] — un par por tabla. Lo usa el interno para
+    llevarse el SQL de una solicitud completa a un archivo y editarlo a mano
+    cuando la corrida necesita alguna variante que la app no ofrece.
+
+    `header_lines` sale como comentarios al principio: de ahi cuelgan la
+    solicitud, el salt usado y el aviso de que el archivo no se comparte.
+    """
+    partes = []
+    if header_lines:
+        partes.append("\n".join(f"-- {line}" for line in header_lines))
+    for titulo, script in entries:
+        partes.append(f"-- ===== {titulo} =====\n{script.rstrip()}")
+    return "\n\n".join(partes) + "\n"
 
 
 def split_statements(script: str):
