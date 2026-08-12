@@ -10,6 +10,8 @@ para re-ejecutarlo desde el historico.
 Sin dependencias de UI ni de red: testeable de forma aislada.
 """
 
+import re
+
 from core import masking
 
 
@@ -43,6 +45,26 @@ def split_partition_fields(fields, partition_cols=None):
     part_names = {f["col"] for f in part}
     data = [f for f in fields if f["col"] not in part_names]
     return data, part
+
+
+def partition_values(filters):
+    """Devuelve `{columna: valor}` leyendo el WHERE de la particion.
+
+    El WHERE lo arma `SparkyClient.get_partition_info` como
+    `"col = valor and col2 = valor2"`. El valor se copia **tal cual**, sin
+    reinterpretarlo ni citarlo: es el mismo texto que filtra el origen, asi que
+    el INSERT escribe en la particion que lee.
+
+    Los terminos que no sean una igualdad simple se ignoran; el que los pida
+    (`build_insert`) se da cuenta porque falta la columna y cae al insert
+    dinamico.
+    """
+    valores = {}
+    for termino in re.split(r"\s+AND\s+", (filters or "").strip(), flags=re.I):
+        col, sep, val = termino.partition("=")
+        if sep and col.strip() and val.strip():
+            valores[col.strip()] = val.strip()
+    return valores
 
 
 def build_create(fields, dest_table, partition_cols=None) -> str:
@@ -84,21 +106,37 @@ def build_insert(
     `filters` es la clausula WHERE (sin la palabra WHERE); si viene vacia o None
     la tabla se trata como no particionada y se inserta completa.
 
-    Con destino particionado se emite un insert dinamico
-    (`INSERT INTO d PARTITION (p) SELECT ..., p`): Impala exige que las columnas
-    de particion vayan **al final** del SELECT, asi que se reordenan.
+    Con destino particionado el insert es **estatico**: los valores salen del
+    mismo WHERE que filtra el origen
+    (`INSERT INTO d PARTITION (year=2026, month=8) SELECT <solo datos> ...`), asi
+    que las columnas de particion **no van en el SELECT** — en un insert estatico
+    Impala no las espera ahi y sobrarian contra la lista de columnas del destino.
+
+    Se cae al insert dinamico de siempre (`PARTITION (year, month)` con esas
+    columnas al final del SELECT, que es donde Impala las exige) en dos casos: si
+    el WHERE no da valor para alguna columna de particion, y si alguna esta
+    enmascarada — el valor estatico se copia del origen sin pasar por la mascara,
+    asi que enmascararla exige que la escriba el SELECT.
     """
     data, part = split_partition_fields(fields, partition_cols)
+    valores = partition_values(filters)
+    estatica = bool(part) and all(
+        f["col"] in valores and f["masking"] == masking.NONE for f in part
+    )
     lines = [
         f"  {masking.select_expr(f['col'], f['masking'], text_salt, int_salt)} "
         f"AS {f['col']}"
-        for f in data + part
+        for f in (data if estatica else data + part)
     ]
     select = ",\n".join(lines)
     where = f"\nWHERE {filters.strip()}" if filters and filters.strip() else ""
-    partition = (
-        f" PARTITION ({', '.join(f['col'] for f in part)})" if part else ""
-    )
+    if estatica:
+        asignaciones = ", ".join(f"{f['col']}={valores[f['col']]}" for f in part)
+        partition = f" PARTITION ({asignaciones})"
+    else:
+        partition = (
+            f" PARTITION ({', '.join(f['col'] for f in part)})" if part else ""
+        )
     return (
         f"INSERT INTO {dest_table}{partition}\n"
         f"SELECT\n"

@@ -119,8 +119,11 @@ Dos campos de `request_items` concentran el reparto de responsabilidades:
   WHERE realmente usado queda registrado en la solicitud.
 - La tabla destino se crea **particionada igual que el origen**
   (`PARTITIONED BY`), solo por las columnas de particion que el interno dejo
-  salir. En Impala esas columnas no se repiten en la lista de columnas, llevan
-  su tipo, y el INSERT es dinamico con ellas al final del SELECT.
+  salir. En Impala esas columnas no se repiten en la lista de columnas y llevan
+  su tipo. El INSERT escribe la particion con los valores del mismo WHERE
+  (`PARTITION (year=2026, month=8, day=10)`) y por eso esas columnas **no van en
+  el SELECT**; si el WHERE no da los valores, o la columna va enmascarada, cae al
+  insert dinamico con ellas al final del SELECT.
 - El historico guarda los scripts **con placeholders**, nunca con los salts
   reales: las tablas de coordinacion las leen los aliados. Al re-ejecutar se
   sustituyen con los salts locales de la maquina interna.

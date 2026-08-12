@@ -97,6 +97,9 @@ Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tab
   agregar una columna ahi la propaga sola.
 - **Particionado.** El destino hereda las columnas de particion del origen
   (`sql_builder.build_create/build_insert`). En Impala no se repiten en la lista de
-  columnas, llevan tipo, y en el INSERT van al final del SELECT con `PARTITION (...)`.
-  `partition_cols=None` tiene que seguir dando el SQL de antes: las solicitudes viejas se
-  verifican regenerando su script y comparandolo con el guardado.
+  columnas del CREATE y llevan tipo. El INSERT es **estatico**: la particion se escribe
+  con los valores del mismo WHERE (`PARTITION (year=2026, month=8)`) y esas columnas
+  **salen del SELECT**. Solo si el WHERE no da los valores, o la columna va enmascarada
+  (el valor estatico no pasa por la mascara), se cae al insert dinamico con ellas al
+  final del SELECT. `partition_cols=None` tiene que seguir dando el SQL de antes: las
+  solicitudes viejas se verifican regenerando su script y comparandolo con el guardado.

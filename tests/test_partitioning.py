@@ -1,8 +1,10 @@
 """El destino se crea particionado igual que el origen.
 
 En Impala las columnas de particion no se repiten en la lista de columnas
-normales, llevan tipo, y en el INSERT dinamico tienen que ir al final del
-SELECT. Estos tests fijan esas tres reglas.
+normales del CREATE y llevan tipo. En el INSERT la particion se escribe con los
+valores del WHERE (`PARTITION (year=2026, month=8)`) y esas columnas salen del
+SELECT; solo cuando el valor no se puede leer del WHERE — o la columna va
+enmascarada — se usa el insert dinamico, que las exige al final del SELECT.
 """
 
 import pytest
@@ -34,7 +36,38 @@ def test_create_no_repite_las_columnas_de_particion():
     assert "  nombre STRING" in cuerpo
 
 
-def test_insert_dinamico_con_particion_al_final():
+WHERE_PART = "ingestion_year = 2026 and ingestion_month = 8"
+
+
+def test_insert_escribe_la_particion_con_los_valores_del_where():
+    insert = sql_builder.build_insert(
+        FIELDS, "origen.t", DEST, "s", 1, WHERE_PART, PART
+    )
+    assert (
+        f"INSERT INTO {DEST} PARTITION (ingestion_year=2026, ingestion_month=8)"
+        in insert
+    )
+    # el WHERE sigue filtrando el origen: se lee y se escribe la misma particion
+    assert f"WHERE {WHERE_PART}" in insert
+
+
+def test_insert_estatico_saca_la_particion_del_select():
+    """En un insert estatico Impala no espera esas columnas en el SELECT."""
+    insert = sql_builder.build_insert(
+        FIELDS, "origen.t", DEST, "s", 1, WHERE_PART, PART
+    )
+    select = insert.split("FROM")[0]
+    alias = [ln.split(" AS ")[-1].strip(" ,") for ln in select.splitlines() if " AS " in ln]
+    assert alias == ["nombre", "edad"]
+
+
+def test_valores_de_particion_se_copian_tal_cual_del_where():
+    valores = sql_builder.partition_values("ingestion_day = '2026-08-01' AND h = 3")
+    assert valores == {"ingestion_day": "'2026-08-01'", "h": "3"}
+
+
+def test_insert_dinamico_cuando_el_where_no_da_los_valores():
+    """Sin valores no se puede escribir la particion a mano: van al final del SELECT."""
     insert = sql_builder.build_insert(FIELDS, "origen.t", DEST, "s", 1, None, PART)
     assert f"INSERT INTO {DEST} PARTITION (ingestion_year, ingestion_month)" in insert
     cols = [ln.strip() for ln in insert.splitlines() if " AS " in ln]
@@ -42,6 +75,21 @@ def test_insert_dinamico_con_particion_al_final():
         "ingestion_year AS ingestion_year,",
         "ingestion_month AS ingestion_month",
     ]
+
+
+def test_insert_dinamico_si_la_particion_va_enmascarada():
+    """El valor estatico se copia sin mascara: enmascarar exige el SELECT."""
+    con_mascara = [
+        dict(f, masking=masking.MASK_INT)
+        if f["col"] == "ingestion_month"
+        else f
+        for f in FIELDS
+    ]
+    insert = sql_builder.build_insert(
+        con_mascara, "origen.t", DEST, "s", 1, WHERE_PART, PART
+    )
+    assert f"INSERT INTO {DEST} PARTITION (ingestion_year, ingestion_month)" in insert
+    assert "AS ingestion_month" in insert
 
 
 def test_respeta_el_orden_de_particion_del_origen():
