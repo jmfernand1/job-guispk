@@ -108,7 +108,7 @@ def build_insert(
 
     Con destino particionado el insert es **estatico**: los valores salen del
     mismo WHERE que filtra el origen
-    (`INSERT INTO d PARTITION (year=2026, month=8) SELECT <solo datos> ...`), asi
+    (`INSERT INTO d PARTITION (year = 2026, month = 8) SELECT <solo datos> ...`), asi
     que las columnas de particion **no van en el SELECT** — en un insert estatico
     Impala no las espera ahi y sobrarian contra la lista de columnas del destino.
 
@@ -131,7 +131,7 @@ def build_insert(
     select = ",\n".join(lines)
     where = f"\nWHERE {filters.strip()}" if filters and filters.strip() else ""
     if estatica:
-        asignaciones = ", ".join(f"{f['col']}={valores[f['col']]}" for f in part)
+        asignaciones = ", ".join(f"{f['col']} = {valores[f['col']]}" for f in part)
         partition = f" PARTITION ({asignaciones})"
     else:
         partition = (

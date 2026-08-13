@@ -18,7 +18,7 @@ antes de correr nada.
 El INSERT escribe la particion a mano, con los valores tomados del mismo WHERE:
 
 ```sql
-INSERT INTO destino PARTITION (year=2026, month=8, day=10)
+INSERT INTO destino PARTITION (year = 2026, month = 8, day = 10)
 SELECT
   mask_text(nombre, '...') AS nombre,
   saldo AS saldo
@@ -28,7 +28,7 @@ WHERE year = 2026 and month = 8 and day = 10;
 
 Dos cambios respecto de 010:
 
-1. La clausula lleva `col=valor` separados por comas, en el orden de particion del
+1. La clausula lleva `col = valor` separados por comas, en el orden de particion del
    origen.
 2. **Las columnas de particion salen del SELECT.** En un insert estatico Impala no
    las espera ahi: si se dejan, sobran contra la lista de columnas del destino.

@@ -27,7 +27,7 @@ Tres reglas que impone Impala y que el generador respeta:
 3. **En el INSERT van al final del SELECT**, con clausula
    `PARTITION (col, ...)` explicita: es un insert dinamico, y Impala exige ese
    orden. *(Corregido por [013](013-insert-con-particion-estatica.md): hoy el
-   INSERT escribe los valores — `PARTITION (year=2026, ...)` — y esas columnas
+   INSERT escribe los valores — `PARTITION (year = 2026, ...)` — y esas columnas
    salen del SELECT; el insert dinamico quedo como caida.)*
 
 Se particiona solo por las columnas de particion que el interno dejo salir: una

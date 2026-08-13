@@ -44,7 +44,7 @@ def test_insert_escribe_la_particion_con_los_valores_del_where():
         FIELDS, "origen.t", DEST, "s", 1, WHERE_PART, PART
     )
     assert (
-        f"INSERT INTO {DEST} PARTITION (ingestion_year=2026, ingestion_month=8)"
+        f"INSERT INTO {DEST} PARTITION (ingestion_year = 2026, ingestion_month = 8)"
         in insert
     )
     # el WHERE sigue filtrando el origen: se lee y se escribe la misma particion
