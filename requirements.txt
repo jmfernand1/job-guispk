@@ -1,6 +1,9 @@
 # Dependencias de la app de enmascaramiento.
 # Sparky es una libreria INTERNA ya instalada en el entorno del usuario; no va aqui.
+sparky-bc
 PyQt6>=6.5
-pandas>=1.5
+# pandas>=1.5
+# Solo la app aliado (conexion ODBC a Impala con el DSN corporativo):
+# pyodbc>=5.0
 # Para correr los tests:
 pytest>=7.0

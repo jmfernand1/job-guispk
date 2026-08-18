@@ -8,7 +8,33 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from core import masking, review, sql_builder, states
 from core.store import history_repo
-from interno.sparky_client import extract_columns
+from core.sparky_client import extract_columns
+
+
+def resolve_partition(client, item):
+    """Re-resuelve contra Impala la particion del origen de un item.
+
+    Devuelve `(part_cols, where, aviso)`. Si la solicitud no pedia particion no
+    consulta nada; si la consulta falla se cae al WHERE snapshot de la solicitud
+    y el destino queda sin particionar, con el aviso para el log.
+
+    Lo comparten el worker que ejecuta y el que solo arma el SQL para exportarlo:
+    asi el .sql que el interno se lleva es exactamente el que se ejecutaria.
+    """
+    src = item["src_table"]
+    if not item["partition_where_requested"]:
+        return None, None, None
+    try:
+        part_cols, where = client.get_partition_info(src)
+    except Exception as exc:  # noqa: BLE001 - sin particion fresca manda la pedida
+        return (
+            None,
+            item["partition_where_requested"],
+            f"{src}: no se pudo re-resolver la particion ({exc}); "
+            "se usa el WHERE de la solicitud y el destino queda "
+            "sin particionar.",
+        )
+    return part_cols, where, None
 
 
 class ConnectWorker(QThread):
@@ -220,21 +246,20 @@ class ExecuteRequestWorker(QThread):
                     )
                 review.validate_final_fields(item["fields"], final)
 
-                if item["partition_where_requested"]:
-                    try:
-                        fresh_where = self._client.get_partition(src)
-                    except Exception as exc:  # noqa: BLE001
-                        fresh_where = item["partition_where_requested"]
-                        log.append(
-                            f"{src}: no se pudo re-resolver la particion ({exc}); "
-                            "se usa el WHERE de la solicitud."
-                        )
-                else:
-                    fresh_where = None
+                # Las columnas de particion se leen del origen al ejecutar (no
+                # del snapshot): el destino se crea particionado igual que la
+                # fuente, y si la fuente cambio, manda la fuente.
+                part_cols, fresh_where, aviso = resolve_partition(self._client, item)
+                if aviso:
+                    log.append(aviso)
 
                 drop, create, insert, script = sql_builder.build_request_script(
-                    final, src, dest, fresh_where
+                    final, src, dest, fresh_where, part_cols
                 )
+                if part_cols:
+                    log.append(
+                        f"{dest}: particionado por {', '.join(part_cols)}."
+                    )
                 self.progress.emit(f"[{i}/{len(req['items'])}] DROP {dest}...")
                 self._client.run(drop)
                 self.progress.emit(f"[{i}/{len(req['items'])}] CREATE {dest}...")
@@ -264,6 +289,60 @@ class ExecuteRequestWorker(QThread):
                 executed_partition_where=" | ".join(executed_wheres) or None,
             )
             self.finished.emit("\n".join(log))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+
+
+class BuildScriptsWorker(QThread):
+    """Arma el SQL de una solicitud sin ejecutar nada: es lo que se exporta.
+
+    Hace lo mismo que ExecuteRequestWorker antes de correr una sola sentencia
+    (valida la decision contra lo pedido, re-resuelve la particion, construye el
+    script con placeholders de salt) y ahi se detiene: no toca la tabla destino,
+    ni la solicitud, ni el historico. Va en un QThread porque re-resolver la
+    particion consulta Impala y tarda segundos.
+
+    Trabaja con las decisiones que el interno tiene en pantalla, no con
+    `fields_final`: exportar sirve justamente para revisar el SQL antes de
+    guardar nada.
+    """
+
+    finished = pyqtSignal(object)  # [{src_table, dest_table, partition_where, script, aviso}]
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, client, request, decisions):
+        super().__init__()
+        self._client = client
+        self._request = request
+        self._decisions = decisions
+
+    def run(self):
+        items = self._request["items"]
+        try:
+            if len(items) != len(self._decisions):
+                raise ValueError(
+                    "La solicitud cambio en pantalla. Refresca e intenta de nuevo."
+                )
+            salida = []
+            for i, (item, fields) in enumerate(zip(items, self._decisions), start=1):
+                src, dest = item["src_table"], item["dest_table"]
+                self.progress.emit(f"[{i}/{len(items)}] Armando el SQL de {src}...")
+                review.validate_final_fields(item["fields"], fields)
+                part_cols, where, aviso = resolve_partition(self._client, item)
+                script = sql_builder.build_request_script(
+                    fields, src, dest, where, part_cols
+                )[3]
+                salida.append(
+                    {
+                        "src_table": src,
+                        "dest_table": dest,
+                        "partition_where": where,
+                        "script": script,
+                        "aviso": aviso,
+                    }
+                )
+            self.finished.emit(salida)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(str(exc))
 

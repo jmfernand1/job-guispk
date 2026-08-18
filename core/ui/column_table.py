@@ -1,10 +1,14 @@
 """QTableWidget para seleccionar campos y su enmascaramiento."""
 
-from PyQt6.QtCore import Qt
+import unicodedata
+
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
+    QLabel,
+    QLineEdit,
     QTableWidget,
     QTableWidgetItem,
     QWidget,
@@ -21,6 +25,36 @@ COL_PREVIEW = 4
 _MASK_ORDER = [masking.MASK_TEXT, masking.MASK_INT, masking.NONE]
 
 
+def normalize(text):
+    """Minusculas y sin acentos: 'Año_Créd' -> 'ano_cred'."""
+    decomposed = unicodedata.normalize("NFD", text or "")
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def matches(needle, name):
+    """True si `name` se parece a lo tecleado en `needle`.
+
+    Tres formas de coincidir, de la mas estricta a la mas laxa:
+    subcadena ('cli' -> 'num_cliente'), todos los trozos separados por espacio
+    ('num cli' -> 'num_cliente') y subsecuencia ('nclte' -> 'num_cliente'),
+    para que el filtro siga sirviendo con nombres a medio recordar.
+    """
+    needle, name = normalize(needle).strip(), normalize(name)
+    if not needle:
+        return True
+    if needle in name:
+        return True
+    parts = needle.split()
+    if len(parts) > 1 and all(p in name for p in parts):
+        return True
+    pos = 0
+    for ch in needle.replace(" ", ""):
+        pos = name.find(ch, pos) + 1
+        if pos == 0:
+            return False
+    return True
+
+
 class ColumnTable(QTableWidget):
     """Una fila por columna: [Usar] | nombre | tipo | [combo] | preview.
 
@@ -28,6 +62,9 @@ class ColumnTable(QTableWidget):
     enmascaramiento y vista previa: el aliado solo elige que columnas necesita
     y el enmascaramiento lo decide el interno.
     """
+
+    #: (visibles, total) cada vez que cambia el filtro o se recargan columnas
+    filterChanged = pyqtSignal(int, int)
 
     def __init__(self, parent=None, with_masking=True):
         super().__init__(0, 5, parent)
@@ -46,6 +83,7 @@ class ColumnTable(QTableWidget):
         # salts actuales para la vista previa
         self._text_salt = "saltTexto"
         self._int_salt = "12345"
+        self._filter = ""
 
     # -- carga --------------------------------------------------------------
     def load_columns(self, columns):
@@ -53,6 +91,7 @@ class ColumnTable(QTableWidget):
         self.setRowCount(0)
         for name, ctype in columns:
             self._add_row(name, ctype)
+        self._apply_filter()
 
     def load_fields(self, fields):
         """fields: [{col, type, masking?}]. Restaura una seleccion guardada.
@@ -63,6 +102,7 @@ class ColumnTable(QTableWidget):
         self.setRowCount(0)
         for f in fields:
             self._add_row(f["col"], f["type"], f.get("masking"))
+        self._apply_filter()
 
     def _add_row(self, name, ctype, mask=None):
         row = self.rowCount()
@@ -119,9 +159,31 @@ class ColumnTable(QTableWidget):
         for row in range(self.rowCount()):
             self._refresh_row(row)
 
+    # -- filtro por nombre --------------------------------------------------
+    def set_filter(self, text):
+        """Oculta las filas cuyo nombre no se parece a `text`.
+
+        Es solo vista: las filas ocultas conservan su marca, asi que filtrar no
+        cambia lo que devuelven `selected_fields` / `selected_columns`.
+        """
+        self._filter = text or ""
+        self._apply_filter()
+
+    def _apply_filter(self):
+        visible = 0
+        for row in range(self.rowCount()):
+            ok = matches(self._filter, self.item(row, COL_NAME).text())
+            self.setRowHidden(row, not ok)
+            visible += ok
+        self.filterChanged.emit(visible, self.rowCount())
+
+    def _visible_rows(self):
+        return (row for row in range(self.rowCount()) if not self.isRowHidden(row))
+
     # -- seleccion ----------------------------------------------------------
     def set_all_checked(self, checked: bool):
-        for row in range(self.rowCount()):
+        """Marca/desmarca las filas a la vista: con filtro activo, solo esas."""
+        for row in self._visible_rows():
             chk = self.cellWidget(row, COL_USE).findChild(QCheckBox)
             chk.setChecked(checked)
 
@@ -151,3 +213,34 @@ class ColumnTable(QTableWidget):
             }
             for row in self._checked_rows()
         ]
+
+
+class ColumnFilterBar(QWidget):
+    """Caja de busqueda + contador para una `ColumnTable`.
+
+    Filtra mientras se escribe. El contador ('12 de 340') existe porque las
+    tablas de origen traen cientos de columnas y, con el filtro puesto,
+    'Seleccionar todo' solo toca las visibles: hay que ver cuantas son.
+    """
+
+    def __init__(self, table, parent=None):
+        super().__init__(parent)
+        self._table = table
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("Buscar columna...")
+        self.edit.setClearButtonEnabled(True)
+        self.edit.textChanged.connect(table.set_filter)
+        lay.addWidget(QLabel("Buscar:"))
+        lay.addWidget(self.edit)
+
+        self.count_label = QLabel("")
+        table.filterChanged.connect(self._on_filter_changed)
+        lay.addWidget(self.count_label)
+
+    def _on_filter_changed(self, visible, total):
+        self.count_label.setText(
+            f"{visible} de {total}" if visible != total else f"{total} columnas"
+        )

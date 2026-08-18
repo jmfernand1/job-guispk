@@ -1,8 +1,12 @@
-"""Adaptador fino sobre la libreria interna Sparky.
+"""Adaptador fino sobre la libreria Sparky.
 
-Aisla la dependencia interna para que la UI y los tests no dependan de ella
+Aisla la dependencia para que la UI y los tests no dependan de ella
 directamente. En tests se inyecta un stub (fake_sparky) via `sparky_factory`.
-Solo la app interna importa este modulo; la app aliada nunca lo toca.
+
+Vive en core/ (y no en interno/) porque las dos apps lo usan: el interno
+siempre, y el aliado como camino preferido, cayendo a pyodbc si el entorno no
+trae sparky_bc o el login falla (ver aliado/impala_client.py). El import de
+sparky_bc es perezoso: un aliado sin la libreria instalada nunca lo dispara.
 """
 
 import os
@@ -65,6 +69,11 @@ class SparkyClient:
         """DESCRIBE <tabla> -> pandas.DataFrame con columnas name|type|comment."""
         self._ensure()
         return self._lz.obtener_dataframe(f"DESCRIBE {tabla}")
+
+    def query_df(self, query):
+        """Ejecuta un SELECT y devuelve el DataFrame (lo usa SparkyRunner)."""
+        self._ensure()
+        return self._lz.obtener_dataframe(query)
 
     def run(self, query):
         """Ejecuta una sola query."""

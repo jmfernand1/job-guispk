@@ -23,17 +23,20 @@ from PyQt6.QtWidgets import (
 
 from core import sql_builder
 from core.store import history_repo
-from core.ui.column_table import ColumnTable
-from interno.sparky_client import extract_columns
+from core.ui.column_table import ColumnFilterBar, ColumnTable
+from core.ui.repo_worker import AsyncRepoMixin
+from core.sparky_client import extract_columns
 from interno.workers import DescribeWorker, ExecuteWorker
 
 
-class AdHocPanel(QWidget):
-    def __init__(self, client, status_cb, parent=None, history_repo=None, who_cb=None):
+class AdHocPanel(QWidget, AsyncRepoMixin):
+    def __init__(self, client, status_cb, parent=None, history_cb=None, who_cb=None):
         super().__init__(parent)
         self.client = client
         self._set_status = status_cb
-        self._history = history_repo
+        # callable: el historico vive en Impala y el repo existe solo tras
+        # conectar; se resuelve al momento de registrar, no al construir.
+        self._history_cb = history_cb or (lambda: None)
         # callable: el nombre se lee al ejecutar, no al construir el panel
         self._who_cb = who_cb or getpass.getuser
         self._drop_sql = None
@@ -78,6 +81,7 @@ class AdHocPanel(QWidget):
         btn_row.addStretch()
         lay.addLayout(btn_row)
         self.table = ColumnTable()
+        lay.addWidget(ColumnFilterBar(self.table))
         lay.addWidget(self.table)
         return box
 
@@ -192,9 +196,11 @@ class AdHocPanel(QWidget):
         try:
             fields = self.table.selected_fields()
             try:
-                where_clause = self.client.get_partition(self.src_edit.text().strip())
+                part_cols, where_clause = self.client.get_partition_info(
+                    self.src_edit.text().strip()
+                )
             except Exception:  # noqa: BLE001 - tabla sin particiones
-                where_clause = None
+                part_cols, where_clause = None, None
             drop, create, insert, script = sql_builder.build_script(
                 fields,
                 self.src_edit.text().strip(),
@@ -202,6 +208,7 @@ class AdHocPanel(QWidget):
                 self.text_salt_edit.text(),
                 self.int_salt_edit.text(),
                 where_clause,
+                part_cols,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))
@@ -218,6 +225,7 @@ class AdHocPanel(QWidget):
             self.src_edit.text().strip(),
             self.dest_edit.text().strip(),
             where_clause,
+            part_cols,
         )[3]
         self.sql_view.setPlainText(script)
         self.save_btn.setEnabled(True)
@@ -279,9 +287,12 @@ class AdHocPanel(QWidget):
         QMessageBox.critical(self, "Error al ejecutar", msg)
 
     def _record_history(self, status, error):
-        if self._history is None or not self._history_script:
+        history = self._history_cb()
+        if history is None or not self._history_script:
             return
-        self._history.record(
+        # En worker: el historico vive en Impala y esto corre tras un dialogo
+        # en el hilo de la UI. Si falla, solo se avisa en la barra de estado.
+        record = lambda: history.record(
             who=self._who_cb(),
             origin=history_repo.ORIGIN_ADHOC,
             src_table=self.src_edit.text().strip(),
@@ -291,4 +302,9 @@ class AdHocPanel(QWidget):
             salt_label="ad-hoc (salts escritos a mano)",
             status=status,
             error=error,
+        )
+        self._run_async(
+            record,
+            lambda _: None,
+            lambda msg: self._set_status(f"No se registro en el historico: {msg}"),
         )

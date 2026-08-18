@@ -3,7 +3,6 @@
 import pytest
 
 from core import masking
-from core.store.db import ensure_db
 from core.store.history_repo import (
     ORIGIN_ADHOC,
     ORIGIN_SOLICITUD,
@@ -11,6 +10,7 @@ from core.store.history_repo import (
     STATUS_OK,
     HistoryRepo,
 )
+from tests.fake_impala import new_runner_with_schema
 
 SCRIPT = (
     "-- Script de enmascaramiento\n"
@@ -22,10 +22,8 @@ SCRIPT = (
 
 
 @pytest.fixture
-def repo(tmp_path):
-    path = str(tmp_path / "guispk.db")
-    ensure_db(path)
-    return HistoryRepo(path)
+def repo():
+    return HistoryRepo(new_runner_with_schema())
 
 
 def _record(repo, **kw):
@@ -49,7 +47,7 @@ def test_record_and_get(repo):
     assert entry["script"] == SCRIPT
     assert entry["status"] == STATUS_OK
     assert entry["request_code"] == "REQ-1"
-    assert entry["at"]
+    assert entry["event_at"]
 
 
 def test_script_guardado_no_lleva_salts_reales(repo):

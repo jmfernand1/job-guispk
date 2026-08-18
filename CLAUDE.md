@@ -63,19 +63,43 @@ When spawning subagents (Agent/Task tool), the routing block is automatically in
 
 # El proyecto: reglas que no se rompen
 
-Motor de enmascaramiento con **dos apps** (interno y aliado) sobre un SQLite en carpeta
-compartida. Contexto completo en [README.md](README.md); el porque de cada decision, en
-[CHANGELOG.md](CHANGELOG.md) (indice con tags → `docs/decisiones/`).
+Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tablas
+`guispk_*` **append-only en Impala** (esquema `proceso_enmascarado`). Contexto completo en
+[README.md](README.md); el porque de cada decision, en [CHANGELOG.md](CHANGELOG.md)
+(indice con tags → `docs/decisiones/`).
 
 - **Entorno.** Tests y apps corren con el entorno conda `guispk`. El python del sistema no
   tiene pytest ni PyQt6:
   `source /opt/miniconda3/etc/profile.d/conda.sh && conda activate guispk && python -m pytest -q`
-- **Capas.** `aliado/` **nunca** importa `interno/` ni `sparky_bc` — su ejecutable se
-  construye excluyendolos. `core/` no importa Qt salvo en `core/ui/`.
-- **Secretos.** La BD compartida la leen los aliados: no puede contener credenciales ni
-  salts. El SQL se guarda con `{{TEXT_SALT}}` / `{{INT_SALT}}` y se sustituye solo al
+- **Capas.** `aliado/` **nunca** importa `interno/` — su ejecutable se construye
+  excluyendolo. Si puede usar `sparky_bc` a traves de `core/sparky_client.py`: llega a
+  Impala por Sparky y cae a pyodbc + su DSN si falla (`connect_impala`). `core/` no
+  importa Qt salvo en `core/ui/`.
+- **Secretos.** Las tablas `guispk_*` las leen los aliados: no pueden contener credenciales
+  ni salts. El SQL se guarda con `{{TEXT_SALT}}` / `{{INT_SALT}}` y se sustituye solo al
   ejecutar. Hay tests que lo verifican; si uno falla, es un fallo de seguridad, no de forma.
-- **Migraciones.** Estrictamente aditivas y nunca se editan una vez publicadas: puede haber
-  un .exe viejo escribiendo en la misma BD. Se agrega una nueva al final de `MIGRATIONS`.
+- **Append-only.** Las `guispk_*` son insert-only (Impala/Parquet no soporta UPDATE): el
+  estado es el fold de eventos (`core/store/requests_repo.py`). Nunca introducir UPDATE ni
+  DELETE, y los cambios de esquema son aditivos via `_ALTERS` en `core/store/ddl.py` (nunca
+  editar DDL publicado: hay .exe viejos escribiendo en las mismas tablas).
+- **Nombres de columna.** Ninguna columna puede llamarse como una palabra reservada de
+  Impala: el `CREATE TABLE` falla al desplegar. Por eso `event_at` / `event_by` /
+  `actor_role` / `note` y no `at` / `who` / `role` / `comment`. `tests/test_ddl_reserved.py`
+  parsea el DDL real y lo verifica; si falla, es el nombre lo que hay que cambiar.
+- **Latencia.** Toda llamada a repos desde la UI pasa por `core/ui/repo_worker.py`
+  (QThread): contra Impala cada consulta tarda segundos. No llamar repos en el hilo de UI.
 - **Quien decide que.** El aliado pide columnas; el enmascaramiento lo decide el interno y
   solo puede restringir (`core/review.py`). No aflojar esa validacion.
+- **Respaldo.** `core/store/backup.py` copia las `guispk_*` a un SQLite en OneDrive (solo
+  la app interna; agendable con `tools/backup_guispk.py`). El restore **inserta lo que
+  falta por id**, nunca borra ni actualiza: un evento duplicado corrompe el fold. El
+  esquema del espejo sale de `ddl.SCHEMA`, que es la unica fuente de verdad de columnas —
+  agregar una columna ahi la propaga sola.
+- **Particionado.** El destino hereda las columnas de particion del origen
+  (`sql_builder.build_create/build_insert`). En Impala no se repiten en la lista de
+  columnas del CREATE y llevan tipo. El INSERT es **estatico**: la particion se escribe
+  con los valores del mismo WHERE (`PARTITION (year = 2026, month = 8)`) y esas columnas
+  **salen del SELECT**. Solo si el WHERE no da los valores, o la columna va enmascarada
+  (el valor estatico no pasa por la mascara), se cae al insert dinamico con ellas al
+  final del SELECT. `partition_cols=None` tiene que seguir dando el SQL de antes: las
+  solicitudes viejas se verifican regenerando su script y comparandolo con el guardado.

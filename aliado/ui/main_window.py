@@ -1,9 +1,13 @@
 """Ventana principal de la app ALIADO (PyQt6).
 
-Trabaja 100% offline contra la BD compartida: navega el catalogo capturado por
-el equipo interno, elige las columnas que necesita y crea solicitudes formales.
-El enmascaramiento de cada columna lo decide el equipo interno al ejecutar; el
-aliado no lo elige ni ve los salts.
+Trabaja contra las tablas de coordinacion guispk_* en Impala (conexion ODBC
+propia del aliado, ya establecida por el dialogo de conexion): navega el
+catalogo capturado por el equipo interno, elige las columnas que necesita y
+crea solicitudes formales. El enmascaramiento de cada columna lo decide el
+equipo interno al ejecutar; el aliado no lo elige ni ve los salts.
+
+Toda llamada a los repos corre en un RepoWorker: contra Impala cada consulta
+tarda segundos y no debe congelar la UI.
 """
 
 import getpass
@@ -27,30 +31,43 @@ from PyQt6.QtWidgets import (
 )
 
 from core import models, review, sql_builder, states
+from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
 from core.store.requests_repo import RequestsRepo
 from core.ui.catalog_browser import CatalogBrowser
-from core.ui.column_table import ColumnTable
+from core.ui.column_table import ColumnFilterBar, ColumnTable
+from core.ui.repo_worker import AsyncRepoMixin
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, db_path):
+class MainWindow(QMainWindow, AsyncRepoMixin):
+    def __init__(
+        self,
+        runner,
+        schema: str = ddl.DEFAULT_SCHEMA,
+        username: str = "",
+        backend: str = "",
+    ):
         super().__init__()
         self.setWindowTitle("Enmascarador de datos - ALIADO")
         self.resize(1100, 820)
 
-        self.catalog_repo = CatalogRepo(db_path)
-        self.requests_repo = RequestsRepo(db_path)
+        self.catalog_repo = CatalogRepo(runner, schema)
+        self.requests_repo = RequestsRepo(runner, schema)
         self._current_entry = None      # entrada del catalogo seleccionada
         self._preview = None            # (fields, src, dest, where, script)
         self._current_request = None
+        self._requests = []
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
         tabs.addTab(self._build_new_request_tab(), "Nueva solicitud")
         tabs.addTab(self._build_my_requests_tab(), "Mis solicitudes")
 
-        self.status_label = QLabel("Listo.")
+        if username:
+            self.requester_edit.setText(username)
+
+        # El backend a la vista: si Sparky fallo y quedo en ODBC, se ve aqui.
+        self.status_label = QLabel(f"Listo. Conexion: {backend}" if backend else "Listo.")
         self.statusBar().addWidget(self.status_label)
 
         self._reload_catalog()
@@ -61,6 +78,9 @@ class MainWindow(QMainWindow):
 
     def _requester(self):
         return self.requester_edit.text().strip() or getpass.getuser()
+
+    def _show_store_error(self, msg):
+        QMessageBox.critical(self, "Coordinacion (Impala)", msg)
 
     # ======================================================================
     # Tab 1: Nueva solicitud
@@ -73,9 +93,9 @@ class MainWindow(QMainWindow):
         self.requester_edit = QLineEdit(getpass.getuser())
         id_row.addWidget(QLabel("Solicitante:"))
         id_row.addWidget(self.requester_edit)
-        reload_btn = QPushButton("Recargar catalogo")
-        reload_btn.clicked.connect(self._reload_catalog)
-        id_row.addWidget(reload_btn)
+        self.reload_catalog_btn = QPushButton("Recargar catalogo")
+        self.reload_catalog_btn.clicked.connect(self._reload_catalog)
+        id_row.addWidget(self.reload_catalog_btn)
         id_row.addStretch()
         lay.addLayout(id_row)
 
@@ -105,6 +125,7 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         col_lay.addLayout(btn_row)
         self.table = ColumnTable(with_masking=False)
+        col_lay.addWidget(ColumnFilterBar(self.table))
         col_lay.addWidget(self.table)
         lay.addWidget(col_box)
 
@@ -143,11 +164,23 @@ class MainWindow(QMainWindow):
         return page
 
     def _reload_catalog(self):
-        try:
-            self.catalog_browser.load(self.catalog_repo.latest_schemas())
-            self._set_status("Catalogo recargado.")
-        except Exception as exc:  # noqa: BLE001 - BD compartida inaccesible
-            QMessageBox.critical(self, "BD compartida", str(exc))
+        self.reload_catalog_btn.setEnabled(False)
+        self._set_status("Cargando catalogo...")
+        self._run_async(
+            self.catalog_repo.latest_schemas,
+            self._on_catalog_loaded,
+            self._on_catalog_error,
+        )
+
+    def _on_catalog_loaded(self, entries):
+        self.reload_catalog_btn.setEnabled(True)
+        self.catalog_browser.load(entries)
+        self._set_status("Catalogo recargado.")
+
+    def _on_catalog_error(self, msg):
+        self.reload_catalog_btn.setEnabled(True)
+        self._set_status("Error al cargar el catalogo.")
+        self._show_store_error(msg)
 
     def _on_entry_selected(self, entry):
         self._current_entry = entry
@@ -190,30 +223,43 @@ class MainWindow(QMainWindow):
             return
         fields, src, dest, where, preview = self._preview
         requester = self._requester()
-        try:
-            req = self.requests_repo.create_request(requester)
-            self.requests_repo.add_item(
-                req["id"],
-                src,
-                dest,
-                self._current_entry["capture_id"],
-                fields,
-                where,
-                preview,
+        capture_id = self._current_entry["capture_id"]
+        repo = self.requests_repo
+
+        def _create():
+            req = repo.create_request(requester)
+            repo.add_item(
+                req["id"], src, dest, capture_id, fields, where, preview
             )
             if send:
-                self.requests_repo.transition(
+                repo.transition(
                     req["id"], states.ENVIADA, requester, states.ROLE_ALIADO
                 )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "No se pudo crear la solicitud", str(exc))
-            return
+            return req
+
+        self.draft_btn.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        self._set_status("Registrando solicitud...")
+        self._run_async(
+            _create,
+            lambda req: self._on_request_created(req, send),
+            self._on_create_error,
+        )
+
+    def _on_request_created(self, req, send):
         estado = "enviada al equipo interno" if send else "guardada como borrador"
         QMessageBox.information(
             self, "Solicitud creada", f"Solicitud {req['code']} {estado}."
         )
         self._invalidate_preview()
         self._reload_requests()
+        self._set_status("Solicitud registrada.")
+
+    def _on_create_error(self, msg):
+        self.draft_btn.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self._set_status("No se pudo crear la solicitud.")
+        QMessageBox.critical(self, "No se pudo crear la solicitud", msg)
 
     # ======================================================================
     # Tab 2: Mis solicitudes
@@ -223,9 +269,9 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(page)
 
         top = QHBoxLayout()
-        refresh_btn = QPushButton("Refrescar")
-        refresh_btn.clicked.connect(self._reload_requests)
-        top.addWidget(refresh_btn)
+        self.refresh_requests_btn = QPushButton("Refrescar")
+        self.refresh_requests_btn.clicked.connect(self._reload_requests)
+        top.addWidget(self.refresh_requests_btn)
         top.addStretch()
         lay.addLayout(top)
 
@@ -266,35 +312,56 @@ class MainWindow(QMainWindow):
         return page
 
     def _reload_requests(self):
-        try:
-            self._requests = self.requests_repo.list_requests(
-                requester=self._requester()
-            )
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "BD compartida", str(exc))
-            return
+        requester = self._requester()
+        self.refresh_requests_btn.setEnabled(False)
+        self._set_status("Cargando solicitudes...")
+        self._run_async(
+            lambda: self.requests_repo.list_requests(requester=requester),
+            self._on_requests_loaded,
+            self._on_requests_error,
+        )
+
+    def _on_requests_loaded(self, requests):
+        self.refresh_requests_btn.setEnabled(True)
+        self._requests = requests
         self.req_table.setRowCount(0)
         for r in self._requests:
             row = self.req_table.rowCount()
             self.req_table.insertRow(row)
-            review = r["review_comment"] or ""
+            review_txt = r["review_comment"] or ""
             for col, val in enumerate(
-                [r["code"], r["state"], r["created_at"], review]
+                [r["code"], r["state"], r["created_at"], review_txt]
             ):
                 self.req_table.setItem(row, col, QTableWidgetItem(val))
         self._current_request = None
         self.req_detail.clear()
         self._update_buttons()
+        self._set_status("Solicitudes cargadas.")
+
+    def _on_requests_error(self, msg):
+        self.refresh_requests_btn.setEnabled(True)
+        self._set_status("Error al cargar solicitudes.")
+        self._show_store_error(msg)
 
     def _on_request_selected(self):
         row = self.req_table.currentRow()
         if row < 0 or row >= len(self._requests):
             return
-        self._current_request = self.requests_repo.get_request(
-            self._requests[row]["id"]
+        request_id = self._requests[row]["id"]
+        self._set_status("Cargando detalle...")
+        self._run_async(
+            lambda: self.requests_repo.get_request(request_id),
+            self._on_request_detail_loaded,
+            self._on_requests_error,
         )
-        self.req_detail.setPlainText(_render_request(self._current_request))
+
+    def _on_request_detail_loaded(self, req):
+        if req is None:
+            return
+        self._current_request = req
+        self.req_detail.setPlainText(_render_request(req))
         self._update_buttons()
+        self._set_status("Listo.")
 
     def _update_buttons(self):
         req = self._current_request
@@ -307,15 +374,19 @@ class MainWindow(QMainWindow):
     def _transition(self, to_state):
         if not self._current_request:
             return
-        try:
-            self.requests_repo.transition(
-                self._current_request["id"],
-                to_state,
-                self._requester(),
-                states.ROLE_ALIADO,
-            )
-        except states.TransitionError as exc:
-            QMessageBox.warning(self, "No se pudo", str(exc))
+        request_id = self._current_request["id"]
+        requester = self._requester()
+        self._set_status("Actualizando solicitud...")
+        self._run_async(
+            lambda: self.requests_repo.transition(
+                request_id, to_state, requester, states.ROLE_ALIADO
+            ),
+            lambda _: self._reload_requests(),
+            self._on_transition_error,
+        )
+
+    def _on_transition_error(self, msg):
+        QMessageBox.warning(self, "No se pudo", msg)
         self._reload_requests()
 
     def on_export(self):
