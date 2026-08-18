@@ -32,16 +32,46 @@ def build_drop(dest_table) -> str:
     return f"DROP TABLE IF EXISTS {dest_table} PURGE;"
 
 
-def split_partition_fields(fields, partition_cols=None):
+def infer_partition_type(valor) -> str:
+    """Tipo de una columna de particion que no viene entre los campos.
+
+    Se deduce del valor del WHERE: un entero sin comillas es el ano/mes/dia
+    numerico de siempre (BIGINT cubre cualquier ancho); todo lo demas
+    ('2026-08-01' entre comillas, o sin valor conocido) entra como STRING.
+    Es el ultimo recurso: si el DESCRIBE del origen dio el tipo real, manda ese.
+    """
+    if re.fullmatch(r"-?\d+", (valor or "").strip()):
+        return "BIGINT"
+    return "STRING"
+
+
+def split_partition_fields(
+    fields, partition_cols=None, partition_types=None, filters=None
+):
     """Parte los campos en (datos, particion), respetando el orden del origen.
 
     `partition_cols` son los nombres de las columnas por las que particiona la
-    tabla origen (los que devuelve `SparkyClient.get_partition_info`). Solo se
-    particiona por las que el interno dejo pasar: una columna que no viaja al
-    destino no puede ser su clave de particion.
+    tabla origen (los que devuelve `SparkyClient.get_partition_info` desde
+    SHOW PARTITIONS) y **todas** particionan el destino: si el origen esta
+    particionado, el destino tambien. La que no este entre los campos
+    seleccionados se sintetiza sin mascara — es una clave de particion, su
+    valor lo escribe el PARTITION del INSERT — con el tipo que diga
+    `partition_types` (el DESCRIBE del origen) o, en su defecto, el deducido
+    del valor del WHERE (`filters`).
     """
     selected = {f["col"]: f for f in fields}
-    part = [selected[c] for c in (partition_cols or []) if c in selected]
+    valores = partition_values(filters)
+    tipos = partition_types or {}
+    part = []
+    for c in partition_cols or []:
+        f = selected.get(c)
+        if f is None:
+            f = {
+                "col": c,
+                "type": tipos.get(c) or infer_partition_type(valores.get(c)),
+                "masking": masking.NONE,
+            }
+        part.append(f)
     part_names = {f["col"] for f in part}
     data = [f for f in fields if f["col"] not in part_names]
     return data, part
@@ -67,14 +97,32 @@ def partition_values(filters):
     return valores
 
 
-def build_create(fields, dest_table, partition_cols=None) -> str:
+def partition_cols_from_filters(filters):
+    """Columnas de particion deducidas del propio WHERE, en su orden.
+
+    El WHERE de una solicitud salio de `SHOW PARTITIONS`: sus columnas **son**
+    las de particion. Sirve para no perder el particionado cuando no se puede
+    volver a preguntar al origen (`interno.workers.resolve_partition`); el
+    builder nunca lo aplica solo, porque un WHERE escrito a mano no particiona
+    nada y las solicitudes viejas tienen que regenerar identicas.
+    """
+    return list(partition_values(filters))
+
+
+def build_create(
+    fields, dest_table, partition_cols=None, partition_types=None, filters=None
+) -> str:
     """Genera el CREATE TABLE IF NOT EXISTS ... STORED AS PARQUET.
 
     Si el origen esta particionado, el destino se crea con la misma clave via
-    PARTITIONED BY. Ojo: en Impala las columnas de particion **no** se repiten
-    en la lista de columnas normales y llevan su tipo, no solo el nombre.
+    PARTITIONED BY — siempre, con las columnas que dio SHOW PARTITIONS, esten
+    o no entre las seleccionadas. Ojo: en Impala las columnas de particion
+    **no** se repiten en la lista de columnas normales y llevan su tipo, no
+    solo el nombre.
     """
-    data, part = split_partition_fields(fields, partition_cols)
+    data, part = split_partition_fields(
+        fields, partition_cols, partition_types, filters
+    )
     if not data:
         raise ValueError(
             "Todas las columnas seleccionadas son de particion: la tabla "
@@ -99,7 +147,7 @@ def build_create(fields, dest_table, partition_cols=None) -> str:
 
 def build_insert(
     fields, src_table, dest_table, text_salt, int_salt, filters=None,
-    partition_cols=None,
+    partition_cols=None, partition_types=None,
 ) -> str:
     """Genera el INSERT INTO ... SELECT ... FROM <origen> con los alias.
 
@@ -118,7 +166,9 @@ def build_insert(
     enmascarada — el valor estatico se copia del origen sin pasar por la mascara,
     asi que enmascararla exige que la escriba el SELECT.
     """
-    data, part = split_partition_fields(fields, partition_cols)
+    data, part = split_partition_fields(
+        fields, partition_cols, partition_types, filters
+    )
     valores = partition_values(filters)
     estatica = bool(part) and all(
         f["col"] in valores and f["masking"] == masking.NONE for f in part
@@ -147,7 +197,7 @@ def build_insert(
 
 def build_script(
     fields, src_table, dest_table, text_salt, int_salt, filters=None,
-    partition_cols=None,
+    partition_cols=None, partition_types=None,
 ):
     """Devuelve (drop, create, insert, script_completo).
 
@@ -169,12 +219,16 @@ def build_script(
         raise ValueError("Falta el salt entero (hay columnas mask_int).")
 
     drop = build_drop(dest_table)
-    create = build_create(fields, dest_table, partition_cols)
+    create = build_create(
+        fields, dest_table, partition_cols, partition_types, filters
+    )
     insert = build_insert(
         fields, src_table, dest_table, text_salt, int_salt, filters,
-        partition_cols,
+        partition_cols, partition_types,
     )
-    _, part = split_partition_fields(fields, partition_cols)
+    _, part = split_partition_fields(
+        fields, partition_cols, partition_types, filters
+    )
     particion = (
         f"-- Particion: {', '.join(f['col'] for f in part)}\n" if part else ""
     )
@@ -247,7 +301,8 @@ def build_request_preview(fields, src_table, dest_table, filters=None) -> str:
 
 
 def build_request_script(
-    fields, src_table, dest_table, filters=None, partition_cols=None
+    fields, src_table, dest_table, filters=None, partition_cols=None,
+    partition_types=None,
 ):
     """Script con salts placeholder: es el SQL final que arma el interno.
 
@@ -265,4 +320,5 @@ def build_request_script(
         masking.INT_SALT_PLACEHOLDER,
         filters,
         partition_cols,
+        partition_types,
     )

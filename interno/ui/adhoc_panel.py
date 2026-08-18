@@ -45,6 +45,10 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         self._full_script = None
         self._history_script = None
         self._where = None
+        # {columna: tipo} del ultimo DESCRIBE: el PARTITIONED BY del destino
+        # necesita el tipo de las columnas de particion aunque no se hayan
+        # seleccionado.
+        self._col_types = {}
         self._worker = None  # referencia viva al worker en curso
 
         root = QVBoxLayout(self)
@@ -175,6 +179,7 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         if not columns:
             self._set_status("DESCRIBE no devolvio columnas.")
             return
+        self._col_types = dict(columns)
         self.table.load_columns(columns)
         self.table.update_salts(self.text_salt_edit.text(), self.int_salt_edit.text())
         self._prefill_dest()
@@ -195,12 +200,17 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
     def on_generate(self):
         try:
             fields = self.table.selected_fields()
+            aviso = ""
             try:
                 part_cols, where_clause = self.client.get_partition_info(
                     self.src_edit.text().strip()
                 )
-            except Exception:  # noqa: BLE001 - tabla sin particiones
+            except Exception as exc:  # noqa: BLE001 - tabla sin particiones
+                # No se distingue "tabla plana" de "SHOW PARTITIONS fallo", y
+                # la diferencia importa: sin particion el INSERT se lleva la
+                # tabla entera. Se dice en la barra de estado, no en silencio.
                 part_cols, where_clause = None, None
+                aviso = f" Sin particion: {exc}"
             drop, create, insert, script = sql_builder.build_script(
                 fields,
                 self.src_edit.text().strip(),
@@ -209,6 +219,7 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
                 self.int_salt_edit.text(),
                 where_clause,
                 part_cols,
+                self._col_types,
             )
         except ValueError as exc:
             QMessageBox.warning(self, "No se puede generar", str(exc))
@@ -226,11 +237,12 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
             self.dest_edit.text().strip(),
             where_clause,
             part_cols,
+            self._col_types,
         )[3]
         self.sql_view.setPlainText(script)
         self.save_btn.setEnabled(True)
         self.exec_btn.setEnabled(True)
-        self._set_status("SQL generado.")
+        self._set_status(f"SQL generado.{aviso}")
 
     def on_save(self):
         if not self._full_script:

@@ -95,9 +95,14 @@ Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tab
   falta por id**, nunca borra ni actualiza: un evento duplicado corrompe el fold. El
   esquema del espejo sale de `ddl.SCHEMA`, que es la unica fuente de verdad de columnas —
   agregar una columna ahi la propaga sola.
-- **Particionado.** El destino hereda las columnas de particion del origen
-  (`sql_builder.build_create/build_insert`). En Impala no se repiten en la lista de
-  columnas del CREATE y llevan tipo. El INSERT es **estatico**: la particion se escribe
+- **Particionado.** El destino hereda **todas** las columnas de particion del origen
+  (`sql_builder.build_create/build_insert`), las devuelva o no la seleccion: manda
+  `SHOW PARTITIONS`. La que no este entre los campos se sintetiza; su tipo sale del
+  DESCRIBE (`partition_types`) o se deduce del valor del WHERE. El WHERE y las
+  columnas de particion nunca se separan: los dos salen de `SHOW PARTITIONS`, y
+  `resolve_partition` pregunta al origen siempre — si falla, deduce las columnas
+  del propio WHERE de la solicitud. En Impala no se
+  repiten en la lista de columnas del CREATE y llevan tipo. El INSERT es **estatico**: la particion se escribe
   con los valores del mismo WHERE (`PARTITION (year = 2026, month = 8)`) y esas columnas
   **salen del SELECT**. Solo si el WHERE no da los valores, o la columna va enmascarada
   (el valor estatico no pasa por la mascara), se cae al insert dinamico con ellas al

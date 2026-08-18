@@ -99,12 +99,42 @@ def test_respeta_el_orden_de_particion_del_origen():
     assert create.index("ingestion_month int") < create.index("ingestion_year int")
 
 
-def test_columna_de_particion_excluida_no_particiona():
-    """Si el interno no la deja salir, no puede ser clave del destino."""
+def test_columna_de_particion_no_pedida_igual_particiona():
+    """El destino se particiona como el origen aunque no se pidiera la columna.
+
+    Es una clave de particion, no un dato: no va en el SELECT, su valor lo
+    escribe el PARTITION del INSERT. El tipo sale del DESCRIBE del origen.
+    """
     sin_mes = [f for f in FIELDS if f["col"] != "ingestion_month"]
-    create = sql_builder.build_create(sin_mes, DEST, PART)
-    assert "PARTITIONED BY (\n  ingestion_year int\n)" in create
-    assert "ingestion_month" not in create
+    create = sql_builder.build_create(
+        sin_mes, DEST, PART, {"ingestion_month": "int"}
+    )
+    assert "PARTITIONED BY (\n  ingestion_year int,\n  ingestion_month int\n)" in create
+    cuerpo = create.split("PARTITIONED BY")[0]
+    assert "ingestion_month" not in cuerpo
+
+
+def test_particion_no_pedida_se_escribe_estatica_en_el_insert():
+    sin_mes = [f for f in FIELDS if f["col"] != "ingestion_month"]
+    insert = sql_builder.build_insert(
+        sin_mes, "origen.t", DEST, "s", 1, WHERE_PART, PART,
+        {"ingestion_month": "int"},
+    )
+    assert (
+        f"INSERT INTO {DEST} PARTITION (ingestion_year = 2026, ingestion_month = 8)"
+        in insert
+    )
+    assert "AS ingestion_month" not in insert
+
+
+def test_tipo_de_particion_sin_describe_sale_del_valor_del_where():
+    """Sin tipos, un valor entero es BIGINT y uno con comillas STRING."""
+    solo_datos = [f for f in FIELDS if f["col"] not in PART]
+    create = sql_builder.build_create(
+        solo_datos, DEST, ["ingestion_year", "ingestion_day"],
+        filters="ingestion_year = 2026 and ingestion_day = '2026-08-01'",
+    )
+    assert "PARTITIONED BY (\n  ingestion_year BIGINT,\n  ingestion_day STRING\n)" in create
 
 
 def test_sin_particion_el_sql_no_cambia():
@@ -118,10 +148,10 @@ def test_sin_particion_el_sql_no_cambia():
     assert "PARTITION (" not in antes[2]
 
 
-def test_partition_cols_desconocidas_se_ignoran():
-    """Una columna de particion que no esta entre los campos no rompe nada."""
-    create = sql_builder.build_create(FIELDS, DEST, ["no_existe"])
-    assert "PARTITIONED BY" not in create
+def test_partition_cols_fuera_de_la_seleccion_se_sintetizan():
+    """Manda SHOW PARTITIONS: la columna entra al PARTITIONED BY igual."""
+    create = sql_builder.build_create(FIELDS, DEST, ["ingestion_day"])
+    assert "PARTITIONED BY (\n  ingestion_day STRING\n)" in create
 
 
 def test_todo_particion_falla_claro():

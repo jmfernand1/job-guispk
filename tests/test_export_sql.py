@@ -40,6 +40,13 @@ class FakeClient:
             raise RuntimeError("sin conexion")
         return ["ingestion_day"], "ingestion_day = '2026-08-01'"
 
+    def describe(self, tabla):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"name": c["col"], "type": c["type"], "comment": ""} for c in REQUESTED]
+        )
+
 
 # ---------------------------------------------------------------- documento
 
@@ -65,26 +72,49 @@ def test_export_sin_cabecera_no_abre_con_lineas_vacias():
 # ---------------------------------------------------------------- particion
 
 
-def test_resolve_partition_sin_particion_no_consulta():
+def test_resolve_partition_sin_where_en_la_solicitud_igual_particiona():
+    """El snapshot pudo capturarse sin particion; manda SHOW PARTITIONS."""
     workers = pytest.importorskip("interno.workers")
     client = FakeClient()
     item = dict(ITEM, partition_where_requested=None)
-    assert workers.resolve_partition(client, item) == (None, None, None)
-    assert client.calls == []
+    part_cols, where, _, aviso = workers.resolve_partition(client, item)
+    assert client.calls == [ITEM["src_table"]]
+    assert part_cols == ["ingestion_day"]
+    assert where == "ingestion_day = '2026-08-01'"
+    assert "no traia WHERE de particion" in aviso
+
+
+def test_resolve_partition_tabla_plana_no_particiona():
+    """Sin particion en el origen y sin WHERE pedido: es una tabla plana."""
+    workers = pytest.importorskip("interno.workers")
+    item = dict(ITEM, partition_where_requested=None)
+    assert workers.resolve_partition(FakeClient(falla=True), item) == (
+        None,
+        None,
+        None,
+        None,
+    )
 
 
 def test_resolve_partition_reresuelve_contra_impala():
     workers = pytest.importorskip("interno.workers")
-    part_cols, where, aviso = workers.resolve_partition(FakeClient(), ITEM)
+    part_cols, where, part_types, aviso = workers.resolve_partition(
+        FakeClient(), ITEM
+    )
     assert part_cols == ["ingestion_day"]
     assert where == "ingestion_day = '2026-08-01'"
+    assert part_types["ingestion_day"] == "string"
     assert aviso is None
 
 
 def test_resolve_partition_cae_al_where_de_la_solicitud():
     workers = pytest.importorskip("interno.workers")
-    part_cols, where, aviso = workers.resolve_partition(FakeClient(falla=True), ITEM)
-    assert part_cols is None
+    part_cols, where, _, aviso = workers.resolve_partition(
+        FakeClient(falla=True), ITEM
+    )
+    # el WHERE de la solicitud tambien salio de SHOW PARTITIONS: sus columnas
+    # son las de particion, asi que el destino no se queda plano.
+    assert part_cols == ["ingestion_day"]
     assert where == ITEM["partition_where_requested"]
     assert "no se pudo re-resolver la particion" in aviso
 
@@ -150,10 +180,13 @@ def test_worker_rechaza_una_columna_que_no_se_pidio():
 
 
 def test_worker_avisa_si_no_pudo_re_resolver_la_particion():
+    """Avisa, pero el destino sigue particionado: las columnas salen del WHERE."""
     resultado, error = _build(FakeClient(falla=True), [ITEM], [FINAL])
     assert error is None
     assert "no se pudo re-resolver la particion" in resultado[0]["aviso"]
-    assert "PARTITIONED BY" not in resultado[0]["script"]
+    script = resultado[0]["script"]
+    assert "PARTITIONED BY (\n  ingestion_day string\n)" in script
+    assert "PARTITION (ingestion_day = '2026-07-01')" in script
 
 
 def test_worker_falla_si_la_solicitud_cambio_en_pantalla():

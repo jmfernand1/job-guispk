@@ -14,27 +14,60 @@ from core.sparky_client import extract_columns
 def resolve_partition(client, item):
     """Re-resuelve contra Impala la particion del origen de un item.
 
-    Devuelve `(part_cols, where, aviso)`. Si la solicitud no pedia particion no
-    consulta nada; si la consulta falla se cae al WHERE snapshot de la solicitud
-    y el destino queda sin particionar, con el aviso para el log.
+    Devuelve `(part_cols, where, part_types, aviso)`. **El WHERE y las columnas
+    de particion siempre viajan juntos**: los dos salen de `SHOW PARTITIONS`, asi
+    que no hay corrida que filtre por particion sin escribirla en el destino.
+
+    Se pregunta al origen siempre, traiga o no WHERE la solicitud: el snapshot
+    del catalogo puede haberse capturado cuando la tabla no estaba particionada,
+    o con el SHOW PARTITIONS caido, y eso dejaba el destino plano. Si la consulta
+    falla y la solicitud si traia WHERE, las columnas se deducen de ese WHERE
+    (`sql_builder.partition_cols_from_filters`), que tambien salio de SHOW
+    PARTITIONS. Sin ninguna de las dos, la tabla es plana de verdad.
+
+    `part_types` es `{columna: tipo}` del DESCRIBE del origen: el destino se
+    particiona por todas las columnas de SHOW PARTITIONS, incluidas las que el
+    aliado no pidio, y el PARTITIONED BY necesita su tipo. Si el DESCRIBE falla
+    no es motivo de aviso: sql_builder deduce el tipo del valor del WHERE.
 
     Lo comparten el worker que ejecuta y el que solo arma el SQL para exportarlo:
     asi el .sql que el interno se lleva es exactamente el que se ejecutaria.
     """
     src = item["src_table"]
-    if not item["partition_where_requested"]:
-        return None, None, None
+    pedido = item["partition_where_requested"]
     try:
         part_cols, where = client.get_partition_info(src)
     except Exception as exc:  # noqa: BLE001 - sin particion fresca manda la pedida
+        if not pedido:
+            return None, None, None, None  # tabla sin particiones
         return (
+            sql_builder.partition_cols_from_filters(pedido),
+            pedido,
             None,
-            item["partition_where_requested"],
             f"{src}: no se pudo re-resolver la particion ({exc}); "
-            "se usa el WHERE de la solicitud y el destino queda "
-            "sin particionar.",
+            "se usa el WHERE de la solicitud y el destino se particiona "
+            "por sus columnas.",
         )
-    return part_cols, where, None
+    if not pedido:
+        return (
+            part_cols,
+            where,
+            _describe_types(client, src),
+            f"{src}: la solicitud no traia WHERE de particion; se usa la "
+            f"ultima particion del origen ({where}).",
+        )
+    return part_cols, where, _describe_types(client, src), None
+
+
+def _describe_types(client, src):
+    """`{columna: tipo}` del origen para el PARTITIONED BY, o None si falla.
+
+    No es critico: sin tipos, `sql_builder` los deduce del valor del WHERE.
+    """
+    try:
+        return dict(extract_columns(client.describe(src)))
+    except Exception:  # noqa: BLE001 - sin tipos se deducen del WHERE
+        return None
 
 
 class ConnectWorker(QThread):
@@ -249,12 +282,14 @@ class ExecuteRequestWorker(QThread):
                 # Las columnas de particion se leen del origen al ejecutar (no
                 # del snapshot): el destino se crea particionado igual que la
                 # fuente, y si la fuente cambio, manda la fuente.
-                part_cols, fresh_where, aviso = resolve_partition(self._client, item)
+                part_cols, fresh_where, part_types, aviso = resolve_partition(
+                    self._client, item
+                )
                 if aviso:
                     log.append(aviso)
 
                 drop, create, insert, script = sql_builder.build_request_script(
-                    final, src, dest, fresh_where, part_cols
+                    final, src, dest, fresh_where, part_cols, part_types
                 )
                 if part_cols:
                     log.append(
@@ -329,9 +364,11 @@ class BuildScriptsWorker(QThread):
                 src, dest = item["src_table"], item["dest_table"]
                 self.progress.emit(f"[{i}/{len(items)}] Armando el SQL de {src}...")
                 review.validate_final_fields(item["fields"], fields)
-                part_cols, where, aviso = resolve_partition(self._client, item)
+                part_cols, where, part_types, aviso = resolve_partition(
+                    self._client, item
+                )
                 script = sql_builder.build_request_script(
-                    fields, src, dest, where, part_cols
+                    fields, src, dest, where, part_cols, part_types
                 )[3]
                 salida.append(
                     {

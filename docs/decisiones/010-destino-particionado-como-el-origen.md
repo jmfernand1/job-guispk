@@ -32,7 +32,10 @@ Tres reglas que impone Impala y que el generador respeta:
 
 Se particiona solo por las columnas de particion que el interno dejo salir: una
 columna excluida de la solicitud no puede ser clave del destino. Si no queda
-ninguna, el destino sale plano, como antes.
+ninguna, el destino sale plano, como antes. *(Corregido por
+[014](014-particion-siempre-la-del-origen.md): particionan **todas** las columnas
+de `SHOW PARTITIONS`, se hayan pedido o no — la clave de particion no es un dato
+y omitirla dejaba sin particion los destinos de casi todas las solicitudes.)*
 
 Las columnas de particion se leen del **origen al momento de ejecutar**, no del
 snapshot de la captura: si la tabla origen cambio su particionado, manda el
