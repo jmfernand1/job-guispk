@@ -130,7 +130,8 @@ def build_create(
         )
 
     def _decl(f):
-        return f"  {f['col']} {masking.dest_type(f['type'], f['masking'])}"
+        tipo = masking.dest_type(f["type"], f["masking"], f.get("cast"))
+        return f"  {f['col']} {tipo}"
 
     cols = ",\n".join(_decl(f) for f in data)
     partitioned = ""
@@ -174,7 +175,7 @@ def build_insert(
         f["col"] in valores and f["masking"] == masking.NONE for f in part
     )
     lines = [
-        f"  {masking.select_expr(f['col'], f['masking'], text_salt, int_salt)} "
+        f"  {masking.select_expr(f['col'], f['masking'], text_salt, int_salt, f.get('cast'))} "
         f"AS {f['col']}"
         for f in (data if estatica else data + part)
     ]
@@ -245,6 +246,28 @@ def build_script(
         f"{insert}\n"
     )
     return drop, create, insert, script
+
+
+def build_preview_select(cols, src_table, filters=None, limit=100) -> str:
+    """SELECT de muestra sobre el origen, sin enmascarar y acotado por LIMIT.
+
+    Sirve para mirar datos reales antes de decidir la mascara: hay columnas que
+    el DESCRIBE declara string pero que en realidad guardan enteros, y solo se
+    distinguen viendo el contenido. Se lee el origen tal cual, asi que el
+    resultado no se guarda en ningun lado.
+
+    El LIMIT va inlineado (int) porque el ODBC de Impala no acepta parametros
+    ahi; `cols` son nombres de columna del DESCRIBE, no texto del usuario.
+    """
+    if not cols:
+        raise ValueError("No hay columnas para la vista previa.")
+    if not src_table or not src_table.strip():
+        raise ValueError("Falta la tabla origen.")
+    columnas = ", ".join(cols)
+    where = f"\nWHERE {filters.strip()}" if filters and filters.strip() else ""
+    return (
+        f"SELECT {columnas}\nFROM {src_table.strip()}{where}\nLIMIT {int(limit)};"
+    )
 
 
 def build_export_script(entries, header_lines=None) -> str:

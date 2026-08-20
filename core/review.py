@@ -48,6 +48,31 @@ def validate_final_fields(requested, final):
             raise ValueError(
                 f"Enmascaramiento invalido para {col}: {f.get('masking')!r}."
             )
+        _validate_cast(f, col)
+
+
+def _validate_cast(field, col):
+    """El casteo solo existe para enteros guardados como texto.
+
+    Marcarlo es decision del interno (como elegir la mascara), pero solo tiene
+    sentido sobre una columna de tipo texto enmascarada con mask_int: fuera de
+    ahi el `cast(... as bigint)` fallaria o el destino cambiaria de tipo.
+    """
+    cast = field.get("cast")
+    if cast is None:
+        return
+    if cast != masking.CAST_BIGINT:
+        raise ValueError(f"Casteo invalido para {col}: {cast!r}.")
+    if field.get("masking") != masking.MASK_INT:
+        raise ValueError(
+            f"El casteo de {col} exige enmascaramiento mask_int "
+            f"(tiene {field.get('masking')!r})."
+        )
+    if masking.base_type(field["type"]) not in masking.STRING_TYPES:
+        raise ValueError(
+            f"El casteo de {col} solo aplica a columnas de texto "
+            f"(su tipo es {field['type']})."
+        )
 
 
 def excluded_columns(requested, final):

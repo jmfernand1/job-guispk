@@ -14,6 +14,12 @@ MASK_TEXT = "mask_text"
 MASK_INT = "mask_int"
 NONE = "none"
 
+# Casteo opcional de una columna enmascarada con mask_int. Hay campos que son
+# enteros de verdad pero estan guardados como string en el origen: se castean a
+# bigint para pasar por la mascara y vuelven a string para que el INSERT no
+# choque con el tipo del destino.
+CAST_BIGINT = "bigint"
+
 # Etiquetas legibles para el combo de la UI.
 LABELS = {
     MASK_TEXT: "mask_text (texto)",
@@ -48,21 +54,26 @@ def suggest_masking(impala_type: str) -> str:
     return NONE  # decimal / double / timestamp / date / boolean -> sin funcion
 
 
-def select_expr(col: str, masking: str, text_salt: str, int_salt) -> str:
-    """Construye la expresion SELECT para una columna segun su enmascaramiento."""
+def select_expr(col: str, masking: str, text_salt: str, int_salt, cast=None) -> str:
+    """Construye la expresion SELECT para una columna segun su enmascaramiento.
+
+    Con `cast=CAST_BIGINT` la columna es un entero guardado como string: el
+    resultado de mask_int vuelve a string para conservar el tipo del origen.
+    """
     if masking == MASK_TEXT:
         return f"default.mask_text({col}, '{text_salt}')"
     if masking == MASK_INT:
-        return f"default.mask_int(cast({col} as bigint), {int_salt})"
+        expr = f"default.mask_int(cast({col} as bigint), {int_salt})"
+        return f"cast({expr} as string)" if cast == CAST_BIGINT else expr
     return col
 
 
-def dest_type(orig_type: str, masking: str) -> str:
+def dest_type(orig_type: str, masking: str, cast=None) -> str:
     """Tipo de la columna en la tabla destino segun el enmascaramiento aplicado."""
     if masking == MASK_TEXT:
         return "STRING"
     if masking == MASK_INT:
-        return "BIGINT"
+        return "STRING" if cast == CAST_BIGINT else "BIGINT"
     return orig_type
 
 

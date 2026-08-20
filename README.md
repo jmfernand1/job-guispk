@@ -151,10 +151,20 @@ pip install -r requirements.txt
 
 Orden de resolucion (ver `core/config.py`):
 
-1. Variables de entorno `GUISPK_DSN` / `GUISPK_SCHEMA` / `GUISPK_BACKUP_DB`
+1. Variables de entorno `GUISPK_DSN` / `GUISPK_SCHEMA` / `GUISPK_BACKUP_DB` /
+   `GUISPK_BACKEND` / `GUISPK_SQLITE_PATH`
 2. `config.ini` junto al ejecutable (ver `config.ini.example`)
 3. Default: DSN vacio (la UI lo pide al conectar), esquema `proceso_enmascarado`,
-   ruta de respaldo vacia (se elige en la pestana Respaldo)
+   ruta de respaldo vacia (se elige en la pestana Respaldo), backend `impala`
+
+Con `backend = sqlite` la coordinacion se abre sobre el `.db` espejo
+(`sqlite_path`, o el del respaldo si no se indica otra ruta) en vez de Impala:
+sirve mientras el DSN esta intermitente. Tambien se conmuta desde la UI — en el
+interno, en la pestana Conexion; en el aliado, en el dialogo de arranque. En ese
+modo se consultan y registran solicitudes, pero **no** se puede ejecutar
+enmascaramiento, refrescar el catalogo ni ver datos del origen: eso vive en
+Impala. Lo escrito sube despues con *Restaurar* (ver decision
+[016](docs/decisiones/016-backend-sqlite-conmutable.md)).
 
 El `config.ini` **nunca** lleva credenciales: usuario y password se piden al
 arrancar (precargados de `USERNAME` / `PSWD` / `DSNLZ` si existen).
@@ -174,6 +184,8 @@ Permisos que necesita cada rol sobre `proceso_enmascarado`:
 | `PSWD` | contrasena |
 | `DSNLZ` | DSN por defecto para el prefill de conexion |
 | `GUISPK_BACKUP_DB` | solo interno: `.db` de respaldo de las `guispk_*` (OneDrive) |
+| `GUISPK_BACKEND` | `impala` (default) o `sqlite`: donde vive la coordinacion |
+| `GUISPK_SQLITE_PATH` | `.db` a usar con `backend = sqlite` (default: el del respaldo) |
 
 ## Ejecutar
 
@@ -205,7 +217,12 @@ estado final. Las pendientes (`borrador`/`enviada`) se recrean a mano.
 3. **Catalogo** — *Actualizar catalogo* corre DESCRIBE + SHOW PARTITIONS +
    ultima ingestion de cada tabla activa y publica los esquemas.
 4. **Solicitudes** — revisar el detalle, **elegir la mascara de cada columna**
-   (y desmarcar las que no deban salir) y decidir en un solo paso:
+   (y desmarcar las que no deban salir) y decidir en un solo paso.
+   *Vista previa (100 filas)* trae una muestra real del origen — las columnas
+   pedidas, con el WHERE de la particion — para reconocer los campos que el
+   `DESCRIBE` declara `string` pero que guardan enteros: esos se marcan con
+   *mask_int (entero guardado como texto)*, que castea a `bigint` para
+   enmascarar y devuelve el resultado a `string`. Luego:
    *Ejecutar solicitud* (guarda la decision auditada, verifica, re-resuelve
    particion, aplica salts, corre DROP + CREATE + INSERT y marca ejecutada con
    log) o *Rechazar* (con motivo). *Exportar SQL (.sql)* arma el mismo SQL que
@@ -268,6 +285,10 @@ un runner que ejecuta el mismo SQL sobre sqlite3 en memoria:
 |---------|-------|
 | `test_masking.py` | mapeo tipo → funcion de enmascaramiento |
 | `test_sql_builder.py` | DROP/CREATE/INSERT, vista previa, `split_statements` |
+| `test_cast_bigint.py` | casteo de enteros guardados como texto; sin la clave, SQL identico |
+| `test_column_table_cast.py` | el combo de mascara ↔ las claves del campo (Qt offscreen) |
+| `test_preview_worker.py` | que consulta la vista previa y como resuelve la particion |
+| `test_sqlite_runner.py` | los repos sobre el archivo espejo y la vuelta a Impala |
 | `test_regeneration.py` | verificacion anti-alteracion y que el SQL final lleve la decision del interno |
 | `test_review.py` | el interno solo puede restringir: nada de columnas no pedidas |
 | `test_store.py` | repos append-only, fold de eventos, ciclo de vida y carreras |
@@ -287,7 +308,8 @@ core/                    nucleo compartido (sin Sparky)
   sparky_client.py       adaptador sobre sparky_bc (import perezoso)
   sparky_runner.py       runner de coordinacion sobre una conexion Sparky
   store/                 coordinacion en Impala: ddl, runner, repos append-only,
-                         backup.py (respaldo/restore a SQLite, solo interno)
+                         backup.py (respaldo/restore a SQLite, solo interno),
+                         sqlite_runner.py (trabajar sobre el espejo si cae el DSN)
                          (db.py y migrations.py quedan solo para la migracion)
   ui/                    widgets compartidos: column_table, catalog_browser,
                          repo_worker (toda llamada a repos corre en QThread)

@@ -9,11 +9,13 @@ INSERT; el esquema lo mantiene la app interna).
     python main_aliado.py --fake     # smoke sin cluster (store en memoria)
 
 DSN y esquema se resuelven con GUISPK_DSN / config.ini (ver core/config.py).
+Con GUISPK_BACKEND=sqlite el dialogo arranca apuntando al .db compartido
+(GUISPK_SQLITE_PATH), para trabajar mientras el DSN esta intermitente.
 """
 
 import sys
 
-from core.config import resolve_settings
+from core.config import BACKEND_SQLITE, resolve_settings
 
 
 def main():
@@ -35,7 +37,12 @@ def main():
         from aliado.ui.connect_dialog import ConnectDialog
         from PyQt6.QtWidgets import QDialog
 
-        dialog = ConnectDialog(dsn_default=settings["dsn"])
+        dialog = ConnectDialog(
+            dsn_default=settings["dsn"],
+            sqlite_default=settings["sqlite_path"],
+            use_sqlite=settings["backend"] == BACKEND_SQLITE,
+            schema=settings["schema"],
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
         runner = dialog.runner

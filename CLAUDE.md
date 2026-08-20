@@ -90,6 +90,18 @@ Motor de enmascaramiento con **dos apps** (interno y aliado) coordinadas por tab
   (QThread): contra Impala cada consulta tarda segundos. No llamar repos en el hilo de UI.
 - **Quien decide que.** El aliado pide columnas; el enmascaramiento lo decide el interno y
   solo puede restringir (`core/review.py`). No aflojar esa validacion.
+- **Campos de columna opcionales.** El dict de campo es `{col, type, masking}` mas claves
+  opcionales que agrega solo el interno (hoy `cast: "bigint"`, para los enteros guardados
+  como string: `cast(default.mask_int(cast(c as bigint), salt) as string)` y destino
+  STRING). Una clave nueva se omite cuando no aplica — nunca `None` — porque el interno
+  verifica cada solicitud regenerando su `sql_preview` desde `fields` y comparandolo con el
+  guardado: ausente tiene que dar SQL identico al de antes. `tests/test_cast_bigint.py` fija
+  esa regresion.
+- **Backend conmutable.** La coordinacion puede vivir en Impala o en el SQLite espejo
+  (`core/store/sqlite_runner.py`, `config.backend`). Los repos solo conocen el Protocol
+  `ImpalaRunner`: no meterles SQL especifico de un motor. En modo sqlite **no** hay tablas
+  de negocio — DESCRIBE, SHOW PARTITIONS, vista previa y ejecucion exigen
+  `client.connected`, no basta con que el store responda.
 - **Respaldo.** `core/store/backup.py` copia las `guispk_*` a un SQLite en OneDrive (solo
   la app interna; agendable con `tools/backup_guispk.py`). El restore **inserta lo que
   falta por id**, nunca borra ni actualiza: un evento duplicado corrompe el fold. El

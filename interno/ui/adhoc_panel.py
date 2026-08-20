@@ -26,7 +26,8 @@ from core.store import history_repo
 from core.ui.column_table import ColumnFilterBar, ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
 from core.sparky_client import extract_columns
-from interno.workers import DescribeWorker, ExecuteWorker
+from interno.ui.data_preview_dialog import DataPreviewDialog
+from interno.workers import DescribeWorker, ExecuteWorker, PreviewWorker
 
 
 class AdHocPanel(QWidget, AsyncRepoMixin):
@@ -50,6 +51,9 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         # seleccionado.
         self._col_types = {}
         self._worker = None  # referencia viva al worker en curso
+        # la vista previa corre aparte: se puede mirar sin cancelar lo demas
+        self._preview_worker = None
+        self._preview_dialog = None
 
         root = QVBoxLayout(self)
         root.addWidget(self._build_source_group())
@@ -80,8 +84,15 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         none_btn = QPushButton("Seleccionar ninguno")
         all_btn.clicked.connect(lambda: self.table.set_all_checked(True))
         none_btn.clicked.connect(lambda: self.table.set_all_checked(False))
+        self.preview_btn = QPushButton("Vista previa (100 filas)")
+        self.preview_btn.setToolTip(
+            "Muestra datos reales del origen para reconocer las columnas de "
+            "texto que en realidad guardan enteros."
+        )
+        self.preview_btn.clicked.connect(self.on_preview)
         btn_row.addWidget(all_btn)
         btn_row.addWidget(none_btn)
+        btn_row.addWidget(self.preview_btn)
         btn_row.addStretch()
         lay.addLayout(btn_row)
         self.table = ColumnTable()
@@ -189,6 +200,38 @@ class AdHocPanel(QWidget, AsyncRepoMixin):
         self.describe_btn.setEnabled(True)
         self._set_status(f"Error en DESCRIBE: {msg}")
         QMessageBox.critical(self, "Error en DESCRIBE", msg)
+
+    def on_preview(self):
+        """Muestra 100 filas del origen: el WHERE lo resuelve el propio worker."""
+        tabla = self.src_edit.text().strip()
+        if not tabla:
+            QMessageBox.warning(self, "Falta tabla", "Indica la tabla origen.")
+            return
+        if not self.client.connected:
+            QMessageBox.warning(self, "Sin conexion", "Conecta a Sparky primero.")
+            return
+        cols = [f["col"] for f in self.table.selected_fields()]
+        if not cols:
+            QMessageBox.warning(
+                self, "Sin columnas", "Carga los campos y marca al menos uno."
+            )
+            return
+        self._preview_dialog = DataPreviewDialog(tabla, self)
+        self._preview_dialog.show()
+        self._preview_worker = PreviewWorker(self.client, tabla, cols)
+        self._preview_worker.progress.connect(self._set_status)
+        self._preview_worker.finished.connect(self._on_preview_ready)
+        self._preview_worker.error.connect(self._on_preview_error)
+        self._preview_worker.start()
+
+    def _on_preview_ready(self, result):
+        df, sql = result
+        self._preview_dialog.show_dataframe(df, sql)
+        self._set_status("Vista previa lista.")
+
+    def _on_preview_error(self, msg):
+        self._preview_dialog.show_error(msg)
+        self._set_status(f"La vista previa fallo: {msg}")
 
     def _prefill_dest(self):
         src = self.src_edit.text().strip()

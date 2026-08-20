@@ -27,6 +27,8 @@ Para el estado **actual** del sistema — como funciona hoy, no por que — ve a
 | [012](docs/decisiones/012-exportar-sql-de-la-solicitud.md) | El interno puede **exportar a un .sql** el SQL de una solicitud (el mismo que se ejecutaria, con los salts reales) para editarlo y correrlo por fuera. | `#sql` `#seguridad` `#ui-interno` | 2026-08-12 |
 | [013](docs/decisiones/013-insert-con-particion-estatica.md) | El INSERT escribe la particion con los valores del WHERE (`PARTITION (year = 2026, month = 8)`) y saca esas columnas del SELECT; corrige la regla 3 de 010. | `#sql` | 2026-08-12 |
 | [014](docs/decisiones/014-particion-siempre-la-del-origen.md) | El destino se particiona por **todas** las columnas de `SHOW PARTITIONS`, se hayan pedido o no, y el WHERE nunca viaja sin su `PARTITION`; corrige 010, que las omitia y dejaba el CREATE/INSERT sin particion. | `#sql` | 2026-08-18 |
+| [015](docs/decisiones/015-vista-previa-y-casteo-de-enteros-como-texto.md) | **Vista previa** de 100 filas del origen para reconocer los enteros guardados como `string`, y opcion de **casteo** que los enmascara con `mask_int` devolviendolos a `string`. | `#sql` `#enmascaramiento` `#ui-interno` | 2026-08-20 |
+| [016](docs/decisiones/016-backend-sqlite-conmutable.md) | Las dos apps pueden abrir la coordinacion sobre el **SQLite espejo** en vez de Impala mientras el DSN esta intermitente; lo escrito sube despues con el restore de 009. | `#bd` `#arquitectura` `#ui-interno` `#ui-aliado` | 2026-08-20 |
 
 ## Tags
 

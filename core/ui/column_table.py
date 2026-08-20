@@ -24,6 +24,19 @@ COL_PREVIEW = 4
 
 _MASK_ORDER = [masking.MASK_TEXT, masking.MASK_INT, masking.NONE]
 
+# Cuarta opcion del combo, solo para columnas de texto: mask_int con casteo de
+# ida y vuelta. No es una mascara distinta, es (mask_int + cast); el combo la
+# ofrece como una sola eleccion porque para quien revisa es una sola decision.
+MASK_INT_AS_STRING = "mask_int_as_string"
+_MASK_INT_AS_STRING_LABEL = "mask_int (entero guardado como texto)"
+
+
+def _combo_key(mask, cast):
+    """Opcion del combo que representa a un campo guardado."""
+    if mask == masking.MASK_INT and cast == masking.CAST_BIGINT:
+        return MASK_INT_AS_STRING
+    return mask
+
 
 def normalize(text):
     """Minusculas y sin acentos: 'Año_Créd' -> 'ano_cred'."""
@@ -94,14 +107,16 @@ class ColumnTable(QTableWidget):
         self._apply_filter()
 
     def load_fields(self, fields):
-        """fields: [{col, type, masking?}]. Restaura una seleccion guardada.
+        """fields: [{col, type, masking?, cast?}]. Restaura una seleccion guardada.
 
         Si el campo trae `masking` se preselecciona en el combo; si no, queda
         la sugerencia automatica por tipo.
         """
         self.setRowCount(0)
         for f in fields:
-            self._add_row(f["col"], f["type"], f.get("masking"))
+            self._add_row(
+                f["col"], f["type"], _combo_key(f.get("masking"), f.get("cast"))
+            )
         self._apply_filter()
 
     def _add_row(self, name, ctype, mask=None):
@@ -128,11 +143,15 @@ class ColumnTable(QTableWidget):
         self.setItem(row, COL_TYPE, type_item)
 
         combo = QComboBox()
-        for key in _MASK_ORDER:
+        opciones = list(_MASK_ORDER)
+        for key in opciones:
             combo.addItem(masking.LABELS[key], key)
-        if mask not in _MASK_ORDER:
+        if masking.base_type(ctype) in masking.STRING_TYPES:
+            combo.addItem(_MASK_INT_AS_STRING_LABEL, MASK_INT_AS_STRING)
+            opciones.append(MASK_INT_AS_STRING)
+        if mask not in opciones:
             mask = masking.suggest_masking(ctype)
-        combo.setCurrentIndex(_MASK_ORDER.index(mask))
+        combo.setCurrentIndex(opciones.index(mask))
         combo.currentIndexChanged.connect(self._refresh_row_factory(row))
         self.setCellWidget(row, COL_MASK, combo)
 
@@ -148,10 +167,18 @@ class ColumnTable(QTableWidget):
 
     def _refresh_row(self, row):
         name = self.item(row, COL_NAME).text()
-        combo = self.cellWidget(row, COL_MASK)
-        mask = combo.currentData()
-        expr = masking.select_expr(name, mask, self._text_salt, self._int_salt)
+        mask, cast = self._row_masking(row)
+        expr = masking.select_expr(
+            name, mask, self._text_salt, self._int_salt, cast
+        )
         self.item(row, COL_PREVIEW).setText(expr)
+
+    def _row_masking(self, row):
+        """(masking, cast) de la fila: desarma la opcion combinada del combo."""
+        key = self.cellWidget(row, COL_MASK).currentData()
+        if key == MASK_INT_AS_STRING:
+            return masking.MASK_INT, masking.CAST_BIGINT
+        return key, None
 
     def update_salts(self, text_salt, int_salt):
         self._text_salt = text_salt or "saltTexto"
@@ -194,15 +221,23 @@ class ColumnTable(QTableWidget):
                 yield row
 
     def selected_fields(self):
-        """Devuelve [{col, type, masking}] de las filas marcadas."""
-        return [
-            {
+        """Devuelve [{col, type, masking, cast?}] de las filas marcadas.
+
+        `cast` solo aparece cuando se eligio el casteo: la clave ausente deja el
+        JSON igual al de siempre y el SQL identico al de antes de esta opcion.
+        """
+        fields = []
+        for row in self._checked_rows():
+            mask, cast = self._row_masking(row)
+            f = {
                 "col": self.item(row, COL_NAME).text(),
                 "type": self.item(row, COL_TYPE).text(),
-                "masking": self.cellWidget(row, COL_MASK).currentData(),
+                "masking": mask,
             }
-            for row in self._checked_rows()
-        ]
+            if cast:
+                f["cast"] = cast
+            fields.append(f)
+        return fields
 
     def selected_columns(self):
         """Devuelve [{col, type}] de las filas marcadas, sin enmascaramiento."""

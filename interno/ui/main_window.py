@@ -11,8 +11,11 @@ que ya corrio; en Respaldo copia las guispk_* a un .db en OneDrive y las
 restaura desde ahi si las borran.
 """
 
+import os
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QFileDialog,
     QGroupBox,
@@ -24,6 +27,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -32,12 +36,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import masking, review, sql_builder, states
+from core import config, masking, review, sql_builder, states
 from core.store import backup as backup_mod
 from core.store import ddl
 from core.store.catalog_repo import CatalogRepo
 from core.store.history_repo import HistoryRepo
 from core.store.requests_repo import RequestsRepo
+from core.store.sqlite_runner import SqliteRunner
 from core.ui.catalog_browser import CatalogBrowser
 from core.ui.column_table import ColumnFilterBar, ColumnTable
 from core.ui.repo_worker import AsyncRepoMixin
@@ -45,11 +50,13 @@ from core.sparky_client import SparkyClient, credentials_from_env
 from core.sparky_runner import SparkyRunner
 from interno import salts as salts_mod
 from interno.ui.adhoc_panel import AdHocPanel
+from interno.ui.data_preview_dialog import DataPreviewDialog
 from interno.workers import (
     BuildScriptsWorker,
     CatalogRefreshWorker,
     ConnectWorker,
     ExecuteRequestWorker,
+    PreviewWorker,
     RerunScriptWorker,
 )
 
@@ -70,6 +77,8 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         store_runner_factory=None,
         schema: str = ddl.DEFAULT_SCHEMA,
         backup_db: str = "",
+        backend: str = config.BACKEND_IMPALA,
+        sqlite_path: str = "",
     ):
         super().__init__()
         self.setWindowTitle("Enmascarador de datos - INTERNO")
@@ -78,11 +87,18 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self.client = SparkyClient(sparky_factory=sparky_factory)
         self._store_runner_factory = store_runner_factory or SparkyRunner
         self._schema = schema
+        # backend de coordinacion elegido: se puede cambiar en el tab Conexion
+        self._backend = backend
+        self._sqlite_path = sqlite_path or backup_db
         self._store_runner = None  # lo necesita el respaldo (no pasa por repos)
         self.catalog_repo = None
         self.requests_repo = None
         self.history_repo = None
         self._worker = None
+        # la vista previa tiene su propio worker: se puede mirar mientras se
+        # revisa la solicitud, sin cancelar lo que este corriendo en _worker
+        self._preview_worker = None
+        self._preview_dialog = None
         self._current_request = None
         self._item_tables = []
         self._history = []
@@ -165,10 +181,80 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         lay.addWidget(self.conn_status)
 
         outer.addWidget(box)
+        outer.addWidget(self._build_backend_group())
         outer.addStretch()
         return page
 
+    def _build_backend_group(self):
+        """Donde viven las guispk_*: Impala, o el archivo espejo si el DSN falla.
+
+        En modo SQLite se trabaja igual (consultar solicitudes, decidir el
+        enmascaramiento) pero no se puede ejecutar nada contra Impala: lo que se
+        escriba aqui sube despues con el restore del tab Respaldo.
+        """
+        box = QGroupBox("Coordinacion: donde viven las tablas guispk_*")
+        lay = QVBoxLayout(box)
+
+        radios = QHBoxLayout()
+        self.backend_impala_radio = QRadioButton("Impala (Sparky / DSN)")
+        self.backend_sqlite_radio = QRadioButton("Archivo SQLite (espejo)")
+        grupo = QButtonGroup(self)
+        grupo.addButton(self.backend_impala_radio)
+        grupo.addButton(self.backend_sqlite_radio)
+        if self._backend == config.BACKEND_SQLITE:
+            self.backend_sqlite_radio.setChecked(True)
+        else:
+            self.backend_impala_radio.setChecked(True)
+        self.backend_sqlite_radio.toggled.connect(self._on_backend_toggled)
+        radios.addWidget(self.backend_impala_radio)
+        radios.addWidget(self.backend_sqlite_radio)
+        radios.addStretch()
+        lay.addLayout(radios)
+
+        ruta = QHBoxLayout()
+        self.sqlite_path_edit = QLineEdit(self._sqlite_path)
+        self.sqlite_path_edit.setPlaceholderText(
+            "Ruta del .db espejo (el mismo del respaldo)"
+        )
+        self.sqlite_pick_btn = QPushButton("Elegir...")
+        self.sqlite_pick_btn.clicked.connect(self._on_pick_sqlite)
+        ruta.addWidget(QLabel("Archivo:"))
+        ruta.addWidget(self.sqlite_path_edit)
+        ruta.addWidget(self.sqlite_pick_btn)
+        lay.addLayout(ruta)
+
+        self.backend_hint = QLabel("")
+        lay.addWidget(self.backend_hint)
+        self._on_backend_toggled(self.backend_sqlite_radio.isChecked())
+        return box
+
+    def _on_backend_toggled(self, sqlite_on):
+        self.sqlite_path_edit.setEnabled(sqlite_on)
+        self.sqlite_pick_btn.setEnabled(sqlite_on)
+        self.dsn_edit.setEnabled(not sqlite_on)
+        self.pwd_edit.setEnabled(not sqlite_on)
+        self.backend_hint.setText(
+            "Modo SQLite: se consultan y registran solicitudes en el archivo. "
+            "No se puede ejecutar enmascaramiento ni refrescar el catalogo "
+            "hasta reconectar a Impala; lo escrito sube con Restaurar."
+            if sqlite_on
+            else "Modo normal: la coordinacion vive en Impala."
+        )
+
+    def _on_pick_sqlite(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Archivo SQLite de coordinacion",
+            self.sqlite_path_edit.text() or "guispk.db",
+            "SQLite (*.db);;Todos (*)",
+        )
+        if path:
+            self.sqlite_path_edit.setText(path)
+
     def on_connect(self):
+        if self.backend_sqlite_radio.isChecked():
+            self._connect_sqlite()
+            return
         self.connect_btn.setEnabled(False)
         self.conn_status.setText("Conectando...")
         self._worker = ConnectWorker(
@@ -181,7 +267,35 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
         self._worker.error.connect(self._on_connect_error)
         self._worker.start()
 
+    def _connect_sqlite(self):
+        """Abre el archivo espejo como coordinacion: sin Sparky de por medio."""
+        path = self.sqlite_path_edit.text().strip()
+        if not path:
+            QMessageBox.warning(
+                self, "Falta el archivo", "Indica la ruta del .db espejo."
+            )
+            return
+        self.connect_btn.setEnabled(False)
+        self.conn_status.setText("Abriendo archivo...")
+        schema = self._schema
+        self._run_async(
+            lambda: SqliteRunner(path, schema),
+            self._on_sqlite_ready,
+            self._on_store_error,
+        )
+
+    def _on_sqlite_ready(self, runner):
+        self._backend = config.BACKEND_SQLITE
+        self._sqlite_path = runner.db_path
+        self._on_store_ready(runner)
+        self.conn_status.setText(f"SQLite: {runner.db_path}")
+        self._set_status(
+            "Coordinacion en SQLite (sin Impala): no se puede ejecutar "
+            "enmascaramiento ni refrescar el catalogo."
+        )
+
     def _on_connected(self, msg):
+        self._backend = config.BACKEND_IMPALA
         self.conn_status.setText("Conectado. Preparando coordinacion...")
         self._set_status(msg)
         # El esquema guispk_* lo crea/asegura SOLO la app interna; los aliados
@@ -528,16 +642,66 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
             page = QWidget()
             page_lay = QVBoxLayout(page)
             page_lay.setContentsMargins(0, 0, 0, 0)
-            page_lay.addWidget(ColumnFilterBar(table))
+            bar = QHBoxLayout()
+            bar.addWidget(ColumnFilterBar(table))
+            preview_btn = QPushButton("Vista previa (100 filas)")
+            preview_btn.setToolTip(
+                "Muestra datos reales del origen para reconocer las columnas "
+                "de texto que en realidad guardan enteros."
+            )
+            preview_btn.clicked.connect(
+                lambda _=False, it=item, tb=table: self.on_preview_item(it, tb)
+            )
+            bar.addWidget(preview_btn)
+            page_lay.addLayout(bar)
             page_lay.addWidget(table)
             self.item_tabs.addTab(
                 page, f"{item['src_table']} -> {item['dest_table']}"
             )
 
+    def on_preview_item(self, item, table):
+        """Trae 100 filas del origen para ver que guardan las columnas de texto."""
+        if not self.client.connected:
+            QMessageBox.warning(
+                self,
+                "Sin conexion",
+                "La vista previa lee el origen: conecta a Sparky primero.",
+            )
+            return
+        cols = [f["col"] for f in table.selected_fields()] or [
+            f["col"] for f in item["fields"]
+        ]
+        self._preview_dialog = DataPreviewDialog(item["src_table"], self)
+        self._preview_dialog.show()
+        self._preview_worker = PreviewWorker(
+            self.client,
+            item["src_table"],
+            cols,
+            item["partition_where_requested"],
+        )
+        self._preview_worker.progress.connect(self._set_status)
+        self._preview_worker.finished.connect(self._on_preview_ready)
+        self._preview_worker.error.connect(self._on_preview_error)
+        self._preview_worker.start()
+
+    def _on_preview_ready(self, result):
+        df, sql = result
+        self._preview_dialog.show_dataframe(df, sql)
+        self._set_status("Vista previa lista.")
+
+    def _on_preview_error(self, msg):
+        self._preview_dialog.show_error(msg)
+        self._set_status("La vista previa fallo.")
+
     def _update_request_buttons(self):
         req = self._current_request
         state = req["state"] if req else None
-        self.execute_btn.setEnabled(state == states.ENVIADA)
+        # ejecutar corre DROP/CREATE/INSERT contra Impala: en modo SQLite el
+        # store responde, pero no hay con que enmascarar.
+        self.execute_btn.setEnabled(
+            state == states.ENVIADA and self.client.connected
+        )
+        # rechazar y decidir solo escriben eventos: eso si funciona offline
         self.reject_btn.setEnabled(state == states.ENVIADA)
         # exportar es solo lectura: sirve tambien para una solicitud ya
         # ejecutada o rechazada, que carga sus columnas en modo consulta.
@@ -988,7 +1152,23 @@ class MainWindow(QMainWindow, AsyncRepoMixin):
                 "como backup_db).",
             )
             return None
+        if self._is_active_sqlite(path):
+            # respaldar sobre el archivo abierto es DELETE + INSERT contra
+            # uno mismo: se perderia justo lo que se quiere guardar.
+            QMessageBox.warning(
+                self, "Es el archivo en uso",
+                "La coordinacion esta abierta sobre ese mismo archivo. "
+                "Reconecta a Impala para respaldarlo o restaurarlo, o elige "
+                "otra ruta.",
+            )
+            return None
         return path
+
+    def _is_active_sqlite(self, path) -> bool:
+        activo = getattr(self._store_runner, "db_path", None)
+        if not activo:
+            return False
+        return os.path.abspath(os.path.expanduser(path)) == os.path.abspath(activo)
 
     def _backup_busy(self, busy: bool):
         for btn in (self.backup_btn, self.restore_btn, self.backup_info_btn):

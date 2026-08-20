@@ -83,6 +83,28 @@ def test_build_request_preview_sin_particion():
     assert "WHERE  : sin particion" in preview
 
 
+def test_build_preview_select_con_where():
+    sql = sql_builder.build_preview_select(
+        ["nombre", "edad"], "origen.t", "year = 2026 and month = 8"
+    )
+    assert sql == (
+        "SELECT nombre, edad\nFROM origen.t\n"
+        "WHERE year = 2026 and month = 8\nLIMIT 100;"
+    )
+
+
+def test_build_preview_select_sin_where_ni_limite_por_defecto():
+    sql = sql_builder.build_preview_select(["nombre"], "origen.t", limit=10)
+    assert sql == "SELECT nombre\nFROM origen.t\nLIMIT 10;"
+
+
+def test_build_preview_select_sin_columnas_o_sin_origen():
+    with pytest.raises(ValueError):
+        sql_builder.build_preview_select([], "origen.t")
+    with pytest.raises(ValueError):
+        sql_builder.build_preview_select(["n"], "  ")
+
+
 def test_no_fields_raises():
     with pytest.raises(ValueError):
         sql_builder.build_script([], "o.t", "d.t", "s", 1)

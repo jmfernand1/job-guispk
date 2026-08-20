@@ -10,6 +10,10 @@ La coordinacion (catalogo, solicitudes, historico) vive en Impala, esquema
 proceso_enmascarado, tablas guispk_*; se accede con la misma conexion Sparky.
 DSN, esquema y ruta del respaldo se resuelven con GUISPK_DSN /
 GUISPK_BACKUP_DB / config.ini (ver core/config.py).
+
+Con GUISPK_BACKEND=sqlite la coordinacion se abre sobre el .db espejo
+(GUISPK_SQLITE_PATH) en vez de Impala: sirve mientras el DSN esta intermitente.
+Tambien se puede cambiar en el tab Conexion.
 """
 
 import sys
@@ -42,6 +46,8 @@ def main():
         store_runner_factory=store_runner_factory,
         schema=settings["schema"],
         backup_db=settings["backup_db"],
+        backend=settings["backend"],
+        sqlite_path=settings["sqlite_path"],
     )
     window.show()
     sys.exit(app.exec())

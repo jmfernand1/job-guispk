@@ -1,7 +1,8 @@
 # Copiar como config.ini junto al ejecutable (o al directorio de trabajo).
 # Tambien pueden usarse las variables de entorno GUISPK_DSN / GUISPK_SCHEMA /
-# GUISPK_BACKUP_DB (tienen prioridad). NUNCA poner credenciales aqui: usuario
-# y password se piden al arrancar (o se precargan de USERNAME / PSWD / DSNLZ).
+# GUISPK_BACKUP_DB / GUISPK_BACKEND / GUISPK_SQLITE_PATH (tienen prioridad).
+# NUNCA poner credenciales aqui: usuario y password se piden al arrancar (o se
+# precargan de USERNAME / PSWD / DSNLZ).
 [guispk]
 # DSN ODBC de Impala (el corporativo ya provisionado en cada maquina).
 dsn = DSN_IMPALA_CORP
@@ -12,3 +13,10 @@ schema = proceso_enmascarado
 # carpeta OneDrive del equipo interno. La app aliada ignora esta clave.
 # Omitir para elegir el archivo a mano en la pestana Respaldo.
 backup_db = ~/OneDrive/guispk/guispk_backup.db
+# Donde vive la coordinacion: impala (default) o sqlite. Con sqlite las apps
+# trabajan sobre el archivo espejo mientras el DSN esta intermitente; no se
+# puede ejecutar enmascaramiento en ese modo. Se conmuta tambien desde la UI.
+# backend = impala
+# Archivo .db a usar con backend = sqlite. Omitir para usar el de backup_db:
+# es el mismo archivo, con las mismas tablas.
+# sqlite_path = ~/OneDrive/guispk/guispk_backup.db

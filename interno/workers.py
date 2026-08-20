@@ -110,6 +110,47 @@ class DescribeWorker(QThread):
             self.error.emit(str(exc))
 
 
+class PreviewWorker(QThread):
+    """Trae una muestra del origen sin enmascarar, para decidir la mascara.
+
+    Hay columnas que el DESCRIBE declara string pero que guardan enteros: la
+    unica forma de distinguirlas es mirar los datos. Se filtra por la particion
+    (la de la solicitud, o la ultima del origen si no viene) para no barrer la
+    tabla entera, y el LIMIT acota lo que viaja.
+
+    Va por el canal de consulta de Sparky (`query_df`), no por el runner del
+    store: son conexiones distintas y esto lee tablas de negocio.
+    """
+
+    finished = pyqtSignal(object)  # (DataFrame, sql)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, client, src_table, columns, where=None, limit=100):
+        super().__init__()
+        self._client = client
+        self._src = src_table
+        self._columns = list(columns)
+        self._where = where
+        self._limit = limit
+
+    def run(self):
+        try:
+            where = self._where
+            if where is None:
+                try:
+                    _, where = self._client.get_partition_info(self._src)
+                except Exception:  # noqa: BLE001 - tabla sin particiones
+                    where = None
+            sql = sql_builder.build_preview_select(
+                self._columns, self._src, where, self._limit
+            )
+            self.progress.emit(f"Leyendo {self._limit} filas de {self._src}...")
+            self.finished.emit((self._client.query_df(sql), sql))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
+
+
 class ExecuteWorker(QThread):
     """Ejecuta una lista de queries en orden (DROP, CREATE, INSERT)."""
 
